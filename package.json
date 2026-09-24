@@ -1,0 +1,16 @@
+{
+  "name": "omnichannel-inbox",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Unified agent inbox for Facebook Messenger, Instagram DM and WhatsApp (Meta APIs)",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev --workspace server",
+    "dev:client": "npm run dev --workspace client",
+    "build": "npm run build --workspace client",
+    "start": "npm run start --workspace server"
+  }
+}

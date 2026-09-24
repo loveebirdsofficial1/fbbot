@@ -1,0 +1,208 @@
+const crypto = require('node:crypto');
+const express = require('express');
+const config = require('./config');
+const db = require('./db');
+const { resolveContact } = require('./services/userinfo');
+const { broadcast } = require('./realtime');
+
+const router = express.Router();
+
+const secrets = (config.appSecret || '').split(',').map((s) => s.trim()).filter(Boolean);
+const relaxSig = process.env.WEBHOOK_SIG_RELAX === 'true';
+
+function verifyHubSignature(req) {
+  const sig = req.get('x-hub-signature-256');
+  if (!secrets.length || !sig) return true;
+  const raw = req.rawBody || JSON.stringify(req.body);
+  for (const secret of secrets) {
+    const expected = crypto
+      .createHmac('sha256', secret)
+      .update(raw)
+      .digest('hex');
+    if (`sha256=${expected}` === sig) return true;
+  }
+  console.warn(`[webhook] SIG-MISMATCH in=${sig} computed=[${secrets.map((s) => `${s.slice(0,8)}...:sha256=${crypto.createHmac('sha256', s).update(raw).digest('hex')}`).join(' | ')}]`);
+  if (relaxSig) {
+    console.warn('[webhook] WEBHOOK_SIG_RELAX=true -> accepting without valid signature');
+    return true;
+  }
+  return false;
+}
+
+// GET /webhook - Meta handshake when subscribing
+router.get('/', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === config.verifyToken) {
+    console.log('[webhook] Subscription verified');
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+function messageBodyFromMessagingEvent(msg) {
+  if (msg.text) return msg.text;
+  if (msg.quick_reply && msg.quick_reply.payload) return msg.quick_reply.payload;
+  if (msg.postback && msg.postback.payload) return msg.postback.payload;
+  if (Array.isArray(msg.attachments) && msg.attachments.length) {
+    return `[Attachment: ${msg.attachments[0].type || 'media'}]`;
+  }
+  return null;
+}
+
+// messenger-style payload (object: 'page' | 'instagram')
+async function ingestMessaging(object, event) {
+  const msg = event.message || event.postback || {};
+  if (msg.is_echo) return; // outbound copy - ignore
+
+  const channel = object === 'instagram' ? 'instagram' : 'facebook';
+
+  // sender lives on the EVENT, not on event.message
+  const extId = (event.sender && event.sender.id) || null;
+  if (!extId) return;
+
+  let info = { name: extId, photo: null };
+  try {
+    info = await resolveContact(channel, extId);
+  } catch {
+    /* keep fallback */
+  }
+
+  // Store the photo only on facebook/webhook-first contact; for instagram the
+  // scoped-user node usually has no profile_pic, so photo stays null there.
+  const conversation = db.findOrCreateConversation({
+    channel,
+    externalId: extId,
+    contactName: info.name,
+    photo: info.photo,
+  });
+
+  db.incrementUnread(conversation.id, false);
+  db.reopenIfResolved(conversation.id);
+
+  const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+  const hasMedia = attachments.length > 0;
+
+  // Media workflows
+  if (hasMedia) {
+    attachments.forEach((attach, i) => {
+      const record = db.addMessage({
+        conversationId: conversation.id,
+        direction: 'inbound',
+        body: i === 0 && msg.text ? msg.text : '',
+        type: attach.type && attach.type !== 'file' ? attach.type : 'document',
+        metaId: msg.mid || null,
+        mediaType: attach.type || 'document',
+        mediaUrl: (attach.payload && attach.payload.url) || null,
+        sender: 'customer',
+      });
+      const full = db.getConversation(conversation.id);
+      broadcast('message', { conversation: full, message: record });
+      console.log(`[webhook] ${channel} <- from ${info.name}: [${attach.type || 'media'}] ${record.media_url || ''}`);
+    });
+    return;
+  }
+
+  const body = messageBodyFromMessagingEvent(msg);
+  if (body === null) return;
+
+  const record = db.addMessage({
+    conversationId: conversation.id,
+    direction: 'inbound',
+    body,
+    type: msg.sticker ? 'sticker' : 'text',
+    metaId: msg.mid || null,
+    sender: 'customer',
+  });
+
+  const full = db.getConversation(conversation.id);
+  broadcast('message', { conversation: full, message: record });
+  console.log(`[webhook] ${channel} <- from ${info.name}: ${body}`);
+}
+
+function ingestWhatsApp(entry) {
+  for (const change of entry.changes || []) {
+    const value = change.value || {};
+    const messages = Array.isArray(value.messages) ? value.messages : [];
+    if (!messages.length) continue; // statuses / unknown
+
+    const contacts = Array.isArray(value.contacts) ? value.contacts : [];
+
+    for (const msg of messages) {
+      const from = msg.from;
+      if (!from || (config.waOwnNumber && from.replace(/\D/g, '') === config.waOwnNumber)) {
+        continue; // echo of our own outbound message
+      }
+
+      const contact = contacts.find((c) => String(c.wa_id) === String(from));
+      const name = (contact && contact.profile && contact.profile.name) || from;
+
+      const conversation = db.findOrCreateConversation({
+        channel: 'whatsapp',
+        externalId: from,
+        contactName: name,
+      });
+
+      db.incrementUnread(conversation.id, false);
+      db.reopenIfResolved(conversation.id);
+
+      const body = msg.type === 'text' && msg.text
+        ? msg.text.body
+        : `[${msg.type || 'unknown'} attachment]`;
+
+      const record = db.addMessage({
+        conversationId: conversation.id,
+        direction: 'inbound',
+        body,
+        type: msg.type || 'text',
+        metaId: msg.id || null,
+      });
+
+      const full = db.getConversation(conversation.id);
+      broadcast('message', { conversation: full, message: record });
+      console.log(`[webhook] whatsapp <- from ${name} (${from}): ${body}`);
+    }
+  }
+}
+
+// POST /webhook - receives events from all connected Meta apps
+router.post('/', express.raw({ type: ['application/json', 'application/*+json'] }), async (req, res) => {
+  req.rawBody = Buffer.isBuffer(req.body) ? req.body : (req.rawBody || null);
+  if (Buffer.isBuffer(req.body)) {
+    try { req.body = JSON.parse(req.body.toString('utf8')); } catch (err) { return res.sendStatus(400); }
+  } else if (typeof req.body === 'string') {
+    try { req.body = JSON.parse(req.body); } catch (err) { return res.sendStatus(400); }
+  }
+  console.log(`[webhook] POST received | bytes: ${req.rawBody ? req.rawBody.length : 'n/a'} | object: ${(req.body || {}).object}`);
+  if (!verifyHubSignature(req)) {
+    console.warn('[webhook] Bad signature');
+    return res.sendStatus(403);
+  }
+
+  // Always ack immediately; Meta retries on non-2xx
+  res.status(200).send('EVENT_RECEIVED');
+
+  const payload = req.body || {};
+  const object = payload.object;
+
+  try {
+    if (object === 'whatsapp_business_account') {
+      for (const entry of payload.entry || []) ingestWhatsApp(entry);
+    } else if (object === 'page' || object === 'instagram') {
+      for (const entry of payload.entry || []) {
+        entry.messaging = entry.messaging || [];
+        for (const event of entry.messaging) {
+          await ingestMessaging(object, event);
+        }
+      }
+    } else {
+      console.log(`[webhook] Unhandled object: ${object}`);
+    }
+  } catch (err) {
+    console.error('[webhook] ingest error:', err);
+  }
+});
+
+module.exports = router;

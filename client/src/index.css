@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand: #b80020;
+  --color-brand-soft: #fce9e8;
+  --color-lemon: #e07820;
+  --color-lemon-soft: #fff4e8;
+  --color-cloud: #f8f8f8;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+::selection {
+  background-color: #b80020;
+  color: #fff;
+}
+
+/* Logo colors ke mutabiq scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #e07820 #f1f5f9;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+*::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #b80020, #e07820);
+  border-radius: 9999px;
+}
