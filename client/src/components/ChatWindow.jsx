@@ -576,9 +576,16 @@ export default function ChatWindow({
             >
               🖼
             </button>
-            <input
+            <textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  e.currentTarget.form?.requestSubmit();
+                }
+              }}
+              rows={1}
               placeholder={
                 pending.length
                   ? 'Media ke liye caption likho (optional)...'
@@ -586,7 +593,7 @@ export default function ChatWindow({
                     ? 'Is message par reply likhein...'
                     : `${channel.label} par reply likhein...`
               }
-              className="flex-1 rounded-lg border border-slate-300 px-4 py-2.5 text-sm text-slate-800 outline-none focus:border-lemon"
+              className="max-h-48 min-h-[42px] flex-1 resize-y rounded-lg border border-slate-300 px-4 py-2.5 text-sm text-slate-800 outline-none focus:border-lemon"
             />
             <button
               type="submit"
