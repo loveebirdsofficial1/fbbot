@@ -1,5 +1,4 @@
-import { useEffect, useState } from 'react';
-import { getToken } from '../api';
+import { useState } from 'react';
 
 function initialsOf(name) {
   const trimmed = (name || '').trim();
@@ -7,43 +6,19 @@ function initialsOf(name) {
 }
 
 export default function Avatar({ name, photo, size = 40, className = '' }) {
-  const [src, setSrc] = useState(null);
-
-  useEffect(() => {
-    let objectUrl = null;
-    let cancelled = false;
-
-    if (!photo) {
-      setSrc(null);
-      return undefined;
-    }
-
-    (async () => {
-      try {
-        const token = getToken();
-        const res = await fetch(photo, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        if (!res.ok) throw new Error(`fetch fail: ${res.status}`);
-        const blob = await res.blob();
-        if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setSrc(objectUrl);
-      } catch {
-        if (!cancelled) setSrc(null);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [photo]);
+  const [failed, setFailed] = useState(false);
 
   const base = `flex items-center justify-center rounded-full overflow-hidden shrink-0 ${className}`;
 
-  if (src) {
-    return <img src={src} alt="profile" className={`${base} object-cover`} />;
+  if (photo && !failed) {
+    return (
+      <img
+        src={photo}
+        alt="profile"
+        onError={() => setFailed(true)}
+        className={`${base} object-cover`}
+      />
+    );
   }
 
   return (

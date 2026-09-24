@@ -196,10 +196,10 @@ export default function ChatWorkspace({ agentView = false }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentView, user?.id]);
 
-  async function send(text) {
+  async function send(text, replyToId = null) {
     if (!activeId || !text.trim()) return;
     try {
-      const { message } = await api.reply(activeId, { body: text.trim() });
+      const { message } = await api.reply(activeId, { body: text.trim(), ...(replyToId ? { reply_to_id: replyToId } : {}) });
       setMessages((prev) => mergeMessages(prev, [message]));
       setConversations((prev) =>
         upsert(prev, {

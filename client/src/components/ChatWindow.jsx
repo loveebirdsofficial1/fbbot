@@ -91,7 +91,52 @@ function Previews({ items, onRemove }) {
   );
 }
 
-function MessageBubble({ m, onDelete, canDelete }) {
+function QuoteBar({ quote, mine = false }) {
+  if (!quote) return null;
+  const sender =
+    quote.sender === 'agent'
+      ? 'Agent'
+      : quote.sender === 'note'
+        ? 'Note'
+        : quote.sender === 'customer'
+          ? 'Customer'
+          : 'Myself';
+  const mediaText = quote.media_url
+    ? quote.media_type === 'image'
+      ? '[image]'
+      : quote.media_type === 'video'
+        ? '[video]'
+        : '[file]'
+    : '';
+  const label = (quote.body || mediaText || '');
+  return (
+    <div
+      className={`mb-1 flex items-center gap-1.5 overflow-hidden rounded-lg border-l-2 px-2 py-1 text-xs ${
+        mine
+          ? 'border-white/60 bg-white/15 text-white/85'
+          : 'border-brand/30 bg-brand-soft text-slate-500'
+      }`}
+    >
+      <span className="shrink-0 font-semibold">↩ {sender}</span>
+      <span className="truncate">{label}</span>
+    </div>
+  );
+}
+
+function ReplyButton({ onClick, after = false }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title="Is message par reply karo (quote)"
+      className={`${after ? 'order-2' : 'order-1'} ml-1.5 mt-2 shrink-0 self-start rounded-full border border-slate-200 bg-white px-2 py-0.5 text-xs text-brand opacity-100 shadow-sm transition hover:bg-brand-soft group-hover/mbubble:opacity-100 md:opacity-0`}
+    >
+      ↩
+    </button>
+  );
+}
+
+function MessageBubble({ m, onReply, replying, onDelete, canDelete }) {
   if (m.sender === 'note') {
     return (
       <div className="flex justify-center">
@@ -116,14 +161,20 @@ function MessageBubble({ m, onDelete, canDelete }) {
 
   const mine = m.direction === 'outbound';
   return (
-    <div className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
+    <div className={`group/mbubble flex ${mine ? 'justify-end' : 'justify-start'}`}>
+      {mine ? (
+        <ReplyButton after onClick={onReply} />
+      ) : (
+        <ReplyButton onClick={onReply} />
+      )}
       <div
         className={`rounded-2xl px-4 py-2 text-sm shadow-sm ${
           mine
             ? 'bg-gradient-to-br from-brand to-lemon text-white shadow-lemon/30'
             : 'bg-white text-slate-800'
-        }`}
+        } ${replying ? 'ring-2 ring-lemon' : ''}`}
       >
+        <QuoteBar quote={m.reply_to} mine={mine} />
         <Media m={m} className="mb-1 max-h-64 max-w-full rounded-lg" mine={mine} />
         {m.body ? <p className="whitespace-pre-wrap break-words">{m.body}</p> : null}
         <p className={`mt-1 text-right text-[10px] ${mine ? 'text-white/60' : 'text-slate-400'}`}>
@@ -165,6 +216,7 @@ export default function ChatWindow({
   const [quickBusy, setQuickBusy] = useState(false);
   const [notesWidth, setNotesWidth] = useState(320);
   const [showInfo, setShowInfo] = useState(false);
+  const [replyingTo, setReplyingTo] = useState(null);
   const fileRef = useRef(null);
   const forwardFileRef = useRef(null);
   const scrollRef = useRef(null);
@@ -182,6 +234,7 @@ export default function ChatWindow({
     setForwardNote('');
     setQuickNote('');
     setShowInfo(false);
+    setReplyingTo(null);
   }, [active?.id]);
 
   useEffect(() => {
@@ -295,20 +348,22 @@ export default function ChatWindow({
     if (!pending.length && !text.trim()) return;
     setSending(true);
     try {
+      const replyToId = replyingTo?.id || null;
       if (pending.length) {
         const caption = text.trim();
         const uploaded = await uploadQueue(pending);
         let i = 0;
         for (const item of uploaded) {
-          await onSendMedia({ body: i === 0 && caption ? caption : '', ...item });
+          await onSendMedia({ body: i === 0 && caption ? caption : '', reply_to_id: replyToId, ...item });
           i++;
         }
         setPending([]);
         setText('');
       } else {
-        await onSend(text.trim());
+        await onSend(text.trim(), replyToId);
         setText('');
       }
+      setReplyingTo(null);
     } catch (err) {
       onError(err.message);
     } finally {
@@ -438,7 +493,12 @@ export default function ChatWindow({
           {messages
             .filter((m) => m.sender !== 'note')
             .map((m) => (
-              <MessageBubble key={m.id} m={m} />
+              <MessageBubble
+                key={m.id}
+                m={m}
+                onReply={() => setReplyingTo(m)}
+                replying={replyingTo?.id === m.id}
+              />
             ))}
           {messages.filter((m) => m.sender !== 'note').length === 0 && (
             <div className="flex h-full items-center justify-center">
@@ -463,6 +523,38 @@ export default function ChatWindow({
           )}
 
           {pending.length > 0 && <Previews items={pending} onRemove={removePending} />}
+
+          {replyingTo && (
+            <div className="mb-2 flex items-start gap-2 rounded-lg border border-lemon/30 bg-lemon-soft px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[10px] font-semibold uppercase tracking-wide text-lemon">
+                  ↩ Reply to{' '}
+                  {replyingTo.direction === 'outbound'
+                    ? 'myself'
+                    : replyingTo.sender === 'agent'
+                      ? 'agent'
+                      : 'customer'}
+                </p>
+                <p className="truncate text-xs text-slate-600">
+                  {replyingTo.media_url
+                    ? (replyingTo.media_type === 'image'
+                        ? '[image]'
+                        : replyingTo.media_type === 'video'
+                          ? '[video]'
+                          : '[file]')
+                    : replyingTo.body || ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReplyingTo(null)}
+                className="rounded p-0.5 text-slate-400 hover:text-brand"
+                title="Reply cancel karo"
+              >
+                ✕
+              </button>
+            </div>
+          )}
 
           <div className="flex gap-2">
             <input
@@ -490,7 +582,9 @@ export default function ChatWindow({
               placeholder={
                 pending.length
                   ? 'Media ke liye caption likho (optional)...'
-                  : `${channel.label} par reply likhein...`
+                  : replyingTo
+                    ? 'Is message par reply likhein...'
+                    : `${channel.label} par reply likhein...`
               }
               className="flex-1 rounded-lg border border-slate-300 px-4 py-2.5 text-sm text-slate-800 outline-none focus:border-lemon"
             />

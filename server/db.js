@@ -75,6 +75,9 @@ if (!msgCols.includes('media_url')) {
 if (!msgCols.includes('sender')) {
   db.exec(`ALTER TABLE messages ADD COLUMN sender TEXT DEFAULT 'customer'`);
 }
+if (!msgCols.includes('reply_to_id')) {
+  db.exec(`ALTER TABLE messages ADD COLUMN reply_to_id INTEGER`);
+}
 db.prepare(`UPDATE agents SET role = 'admin' WHERE email = ?`).run(config.adminEmail);
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -216,17 +219,24 @@ function incrementUnread(id, skip) {
 }
 
 // ------------------------------------------------------------ messages
-function addMessage({ conversationId, direction, body, type = 'text', metaId = null, agentId = null, mediaType = null, mediaUrl = null, sender = null, touchConversation = true }) {
+function addMessage({ conversationId, direction, body, type = 'text', metaId = null, agentId = null, mediaType = null, mediaUrl = null, sender = null, replyToId = null, touchConversation = true }) {
   const t = now();
   const r = db.prepare(
-    `INSERT INTO messages (conversation_id, direction, body, type, meta_id, agent_id, media_type, media_url, sender, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(conversationId, direction, body, type, metaId, agentId, mediaType, mediaUrl, sender || (direction === 'outbound' ? 'agent' : 'customer'), t);
+    `INSERT INTO messages (conversation_id, direction, body, type, meta_id, agent_id, media_type, media_url, sender, reply_to_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(conversationId, direction, body, type, metaId, agentId, mediaType, mediaUrl, sender || (direction === 'outbound' ? 'agent' : 'customer'), replyToId, t);
 
   if (touchConversation) {
     db.prepare('UPDATE conversations SET last_message_at = ? WHERE id = ?').run(t, conversationId);
   }
-  return db.prepare('SELECT * FROM messages WHERE id = ?').get(Number(r.lastInsertRowid));
+  const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(Number(r.lastInsertRowid));
+  if (row.reply_to_id) {
+    const quoted = db.prepare('SELECT id, body, sender, media_type, media_url FROM messages WHERE id = ?').get(row.reply_to_id);
+    row.reply_to = quoted
+      ? { id: quoted.id, sender: quoted.sender, body: quoted.body || '', media_type: quoted.media_type || null, media_url: quoted.media_url || null }
+      : { id: row.reply_to_id, sender: null, body: '', media_type: null, media_url: null };
+  }
+  return row;
 }
 
 // Private note: lives inside the conversation's message thread but is never
@@ -249,13 +259,43 @@ function deleteNoteMessage(messageId) {
 }
 
 function listMessages(conversationId) {
-  return db.prepare(
-    `SELECT m.*, a.name AS agent_name
+  const rows = db.prepare(
+    `SELECT m.*, a.name AS agent_name,
+            r.id AS r_id, r.body AS r_body, r.sender AS r_sender,
+            r.media_type AS r_media_type, r.media_url AS r_media_url
      FROM messages m
      LEFT JOIN agents a ON a.id = m.agent_id
+     LEFT JOIN messages r ON r.id = m.reply_to_id
      WHERE m.conversation_id = ?
      ORDER BY m.id ASC`
   ).all(conversationId);
+
+  return rows.map((row) => {
+    const message = { ...row };
+    delete message.r_id;
+    delete message.r_body;
+    delete message.r_sender;
+    delete message.r_media_type;
+    delete message.r_media_url;
+    if (row.reply_to_id) {
+      if (row.r_id) {
+        message.reply_to = {
+          id: row.r_id,
+          sender: row.r_sender,
+          body: row.r_body || '',
+          media_type: row.r_media_type || null,
+          media_url: row.r_media_url || null,
+        };
+      } else {
+        message.reply_to = { id: row.reply_to_id, sender: null, body: '', media_type: null, media_url: null };
+      }
+    }
+    return message;
+  });
+}
+
+function getMessage(id) {
+  return db.prepare('SELECT * FROM messages WHERE id = ?').get(id);
 }
 
 module.exports = {
@@ -281,5 +321,6 @@ module.exports = {
   getNoteMessage,
   deleteNoteMessage,
   listMessages,
+  getMessage,
   now,
 };

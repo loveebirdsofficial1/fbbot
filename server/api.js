@@ -90,6 +90,14 @@ router.post('/conversations/:id/reply', requireAuth, async (req, res) => {
   const body = (req.body && req.body.body || '').trim();
   const mediaType = (req.body && req.body.media_type || '').trim();
   const mediaUrl = (req.body && req.body.media_url || '').trim();
+  const replyToId = (req.body && req.body.reply_to_id) ? Number(req.body.reply_to_id) : null;
+
+  if (replyToId) {
+    const quoted = db.getMessage(replyToId);
+    if (!quoted || quoted.conversation_id !== conversation.id) {
+      return res.status(400).json({ error: 'reply_to_id is not part of this conversation' });
+    }
+  }
 
   if (mediaUrl && !mediaType) {
     return res.status(400).json({ error: 'media_type is required when sending media' });
@@ -114,6 +122,7 @@ router.post('/conversations/:id/reply', requireAuth, async (req, res) => {
     agentId: req.agent.id,
     mediaType: mediaType || null,
     mediaUrl: mediaUrl || null,
+    replyToId: replyToId || null,
   });
 
   const full = db.getConversation(conversation.id);
