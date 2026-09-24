@@ -14,13 +14,13 @@ async function resolveContact(channel, externalId) {
     }
     if (channel === 'instagram' && config.igAccessToken) {
       const res = await fetch(
-        `https://graph.instagram.com/${config.graphVersion}/${externalId}?fields=username,name,profile_picture_url&access_token=${encodeURIComponent(config.igAccessToken)}`
+        `https://graph.instagram.com/${config.graphVersion}/${externalId}?fields=username,name,profile_pic&access_token=${encodeURIComponent(config.igAccessToken)}`
       );
       const data = await res.json();
       if (data && (data.username || data.name)) {
         return {
           name: data.username || data.name || externalId,
-          photo: data.profile_picture_url || null,
+          photo: data.profile_pic || null,
         };
       }
       if (data && data.error) {
