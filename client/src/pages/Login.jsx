@@ -55,7 +55,7 @@ export default function Login() {
             onChange={(e) => setPassword(e.target.value)}
             required
           />
-          {error && <p className="text-sm text-red-600">{error}</p>}
+          {error && <p className="text-sm text-brand">{error}</p>}
           <button
             type="submit"
             disabled={loading}

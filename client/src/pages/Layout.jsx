@@ -18,7 +18,7 @@ function Item({ to, children, end, badge }) {
     >
       {children}
       {badge ? (
-        <span className="absolute right-2 top-1/2 flex h-5 min-w-[1.25rem] -translate-y-1/2 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+        <span className="absolute right-2 top-1/2 flex h-5 min-w-[1.25rem] -translate-y-1/2 items-center justify-center rounded-full bg-brand px-1 text-[10px] font-bold text-white">
           {badge > 99 ? '99+' : badge}
         </span>
       ) : null}

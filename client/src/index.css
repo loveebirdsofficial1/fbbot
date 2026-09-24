@@ -1,11 +1,11 @@
 @import "tailwindcss";
 
 @theme {
-  --color-brand: #b80020;
-  --color-brand-soft: #fce9e8;
-  --color-lemon: #e07820;
-  --color-lemon-soft: #fff4e8;
-  --color-cloud: #f8f8f8;
+  --color-brand: #0284c7;
+  --color-brand-soft: #e0f2fe;
+  --color-lemon: #38bdf8;
+  --color-lemon-soft: #f0f9ff;
+  --color-cloud: #f6f9fd;
 }
 
 html,
@@ -15,14 +15,14 @@ body,
 }
 
 ::selection {
-  background-color: #b80020;
+  background-color: #0284c7;
   color: #fff;
 }
 
 /* Logo colors ke mutabiq scrollbar */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #e07820 #f1f5f9;
+  scrollbar-color: #38bdf8 #f1f5f9;
 }
 *::-webkit-scrollbar {
   width: 8px;
@@ -32,6 +32,6 @@ body,
   background: #f1f5f9;
 }
 *::-webkit-scrollbar-thumb {
-  background: linear-gradient(180deg, #b80020, #e07820);
+  background: linear-gradient(180deg, #0284c7, #38bdf8);
   border-radius: 9999px;
 }

@@ -5,7 +5,7 @@ import Avatar from './Avatar.jsx';
 
 function BrokenImage({ type = 'image' }) {
   return (
-    <div className="mb-1 flex items-center justify-center rounded-lg border border-red-200 bg-red-50 px-3 py-4 text-xs text-red-500">
+    <div className="mb-1 flex items-center justify-center rounded-lg border border-brand/20 bg-brand-soft px-3 py-4 text-xs text-brand">
       {type === 'image'
         ? '🖼 Image load nahi hui'
         : type === 'video'
@@ -81,7 +81,7 @@ function Previews({ items, onRemove }) {
             type="button"
             onClick={() => onRemove(p.id)}
             title="Hatana"
-            className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white shadow hover:bg-red-700"
+            className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-brand text-xs font-bold text-white shadow hover:brightness-110"
           >
             ×
           </button>
@@ -209,7 +209,7 @@ export default function ChatWindow({
 
   if (!active) {
     return (
-      <div className="flex flex-1 items-center justify-center bg-slate-50">
+      <div className="flex flex-1 items-center justify-center bg-sky-50">
         <p className="text-slate-400">Koi conversation select karo</p>
       </div>
     );
@@ -367,7 +367,7 @@ export default function ChatWindow({
   return (
     <div className="flex flex-1">
       {/* main column */}
-      <div className="flex flex-1 flex-col bg-slate-50">
+      <div className="flex flex-1 flex-col bg-sky-50">
         <div className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3">
           <div className="flex items-center gap-3">
             <Avatar name={active.contact_name} photo={active.photo} className="h-10 w-10 text-base" />
@@ -392,7 +392,7 @@ export default function ChatWindow({
                 ? 'bg-green-100 text-green-700'
                 : active.status === 'pending'
                   ? 'bg-amber-100 text-amber-700'
-                  : 'bg-slate-100 text-slate-500'
+                  : 'bg-sky-100 text-sky-600'
             }`}>
               {active.status}
             </span>
