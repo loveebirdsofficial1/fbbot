@@ -118,6 +118,16 @@ function QuoteBar({ quote, mine = false }) {
       }`}
     >
       <span className="shrink-0 font-semibold">↩ {sender}</span>
+      {quote.media_url && quote.media_type === 'image' && (
+        <img
+          src={quote.media_url}
+          alt="quoted"
+          className="h-8 w-8 shrink-0 rounded object-cover"
+        />
+      )}
+      {quote.media_url && quote.media_type === 'video' && (
+        <span className="shrink-0">🎬</span>
+      )}
       <span className="truncate">{label}</span>
     </div>
   );

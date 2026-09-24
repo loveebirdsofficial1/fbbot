@@ -15,6 +15,7 @@ export default function ChatWorkspace({ agentView = false }) {
   const isStaff = user && user.role === 'admin';
   const [conversations, setConversations] = useState([]);
   const [agents, setAgents] = useState([]);
+  const [search, setSearch] = useState('');
   const [activeId, setActiveId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [active, setActive] = useState(null);
@@ -288,6 +289,14 @@ export default function ChatWorkspace({ agentView = false }) {
 
   const sorted = [...conversations].sort((a, b) => (b.last_message_at || 0) - (a.last_message_at || 0));
 
+  const q = search.trim().toLowerCase();
+  const visible = q
+    ? sorted.filter((c) => {
+        const name = String(c.contact_name || c.external_id || '').toLowerCase();
+        return name.includes(q);
+      })
+    : sorted;
+
   return (
     <div className="relative flex h-full overflow-hidden">
       {/* conversation list */}
@@ -312,9 +321,32 @@ export default function ChatWorkspace({ agentView = false }) {
           </button>
         </div>
         {error && <p className="bg-brand-soft p-2 text-xs text-brand">{error}</p>}
+        <div className="border-b border-slate-200 p-2">
+          <div className="relative">
+            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
+              🔍
+            </span>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Customer name se search karo..."
+              className="w-full rounded-lg border border-slate-300 py-2 pl-8 pr-8 text-sm text-slate-800 outline-none focus:border-lemon"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                title="Search clear karo"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-brand"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
         <div className="flex-1 overflow-y-auto">
           {loading && <p className="p-4 text-sm text-slate-500">Loading...</p>}
-          {sorted.map((c) => {
+          {visible.map((c) => {
             const ch = channelOf(c.channel);
             return (
               <button
@@ -377,8 +409,10 @@ export default function ChatWorkspace({ agentView = false }) {
               </button>
             );
           })}
-          {!loading && !sorted.length && (
-            <p className="p-4 text-sm text-slate-400">Abhi koi conversation nahi hai.</p>
+          {!loading && !visible.length && (
+            <p className="p-4 text-sm text-slate-400">
+              {q ? `"${search}" se koi conversation nahi mili.` : 'Abhi koi conversation nahi hai.'}
+            </p>
           )}
         </div>
       </div>
