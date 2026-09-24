@@ -14,14 +14,17 @@ async function resolveContact(channel, externalId) {
     }
     if (channel === 'instagram' && config.igAccessToken) {
       const res = await fetch(
-        `https://graph.facebook.com/${config.graphVersion}/${externalId}?fields=username,name,profile_pic&access_token=${encodeURIComponent(config.igAccessToken)}`
+        `https://graph.instagram.com/${config.graphVersion}/${externalId}?fields=username,name,profile_picture_url&access_token=${encodeURIComponent(config.igAccessToken)}`
       );
       const data = await res.json();
       if (data && (data.username || data.name)) {
         return {
           name: data.username || data.name || externalId,
-          photo: data.profile_pic || null,
+          photo: data.profile_picture_url || null,
         };
+      }
+      if (data && data.error) {
+        console.warn(`[userinfo] IG resolve fail for ${externalId}: ${data.error.message}`);
       }
     }
   } catch {
