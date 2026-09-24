@@ -87,6 +87,11 @@ async function ingestMessaging(object, event) {
 
   // Media workflows
   if (hasMedia) {
+    let replyToId = null;
+    if (msg.reply_to && msg.reply_to.mid) {
+      const quoted = db.findMessageByMetaId(msg.reply_to.mid, conversation.id);
+      if (quoted) replyToId = quoted.id;
+    }
     attachments.forEach((attach, i) => {
       const record = db.addMessage({
         conversationId: conversation.id,
@@ -97,6 +102,7 @@ async function ingestMessaging(object, event) {
         mediaType: attach.type || 'document',
         mediaUrl: (attach.payload && attach.payload.url) || null,
         sender: 'customer',
+        replyToId,
       });
       const full = db.getConversation(conversation.id);
       broadcast('message', { conversation: full, message: record });
@@ -108,6 +114,14 @@ async function ingestMessaging(object, event) {
   const body = messageBodyFromMessagingEvent(msg);
   if (body === null) return;
 
+  // Customer replies carry a reply_to.mid — link it to the original message so
+  // the quoted media/text shows in the thread.
+  let replyToId = null;
+  if (msg.reply_to && msg.reply_to.mid) {
+    const quoted = db.findMessageByMetaId(msg.reply_to.mid, conversation.id);
+    if (quoted) replyToId = quoted.id;
+  }
+
   const record = db.addMessage({
     conversationId: conversation.id,
     direction: 'inbound',
@@ -115,6 +129,7 @@ async function ingestMessaging(object, event) {
     type: msg.sticker ? 'sticker' : 'text',
     metaId: msg.mid || null,
     sender: 'customer',
+    replyToId,
   });
 
   const full = db.getConversation(conversation.id);

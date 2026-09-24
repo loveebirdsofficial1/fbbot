@@ -298,6 +298,13 @@ function getMessage(id) {
   return db.prepare('SELECT * FROM messages WHERE id = ?').get(id);
 }
 
+function findMessageByMetaId(metaId, conversationId) {
+  if (!metaId) return null;
+  return db
+    .prepare('SELECT * FROM messages WHERE meta_id = ? AND conversation_id = ? LIMIT 1')
+    .get(metaId, conversationId);
+}
+
 module.exports = {
   db,
   seedAdmin,
@@ -322,5 +329,6 @@ module.exports = {
   deleteNoteMessage,
   listMessages,
   getMessage,
+  findMessageByMetaId,
   now,
 };
