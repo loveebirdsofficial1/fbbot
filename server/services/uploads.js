@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const config = require('../config');
+const { isR2Configured, uploadToR2, deleteFromR2 } = require('../lib/r2');
 
 const UPLOADS_DIR = config.uploadDir;
 
@@ -79,21 +80,47 @@ function saveUpload(buffer, originalName, mimeType) {
   if (!isAllowedMime(mimeType)) {
     throw new Error(`File type not allowed: ${mimeType}`);
   }
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   const key = generateKey(originalName, extForMime(mimeType));
+
+  if (isR2Configured) {
+    return uploadToR2(key, buffer, mimeType).then(
+      (publicUrl) => ({ key, url: publicUrl, media_type: mediaTypeFor(mimeType) })
+    );
+  }
+
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   fs.writeFileSync(path.join(UPLOADS_DIR, key), buffer);
-  return { key, url: `/uploads/${key}`, media_type: mediaTypeFor(mimeType) };
+  return Promise.resolve({ key, url: `/uploads/${key}`, media_type: mediaTypeFor(mimeType) });
 }
 
 function deleteUpload(url) {
-  if (!url || !url.startsWith('/uploads/')) return false;
-  const name = path.basename(url);
-  try {
-    fs.unlinkSync(path.join(UPLOADS_DIR, name));
-    return true;
-  } catch {
-    return false;
+  if (!url) return Promise.resolve(false);
+
+  if (isR2Configured && !url.startsWith('/uploads/')) {
+    const publicBase = process.env.R2_PUBLIC_URL?.replace(/\/$/, '');
+    if (publicBase && url.startsWith(publicBase)) {
+      return deleteFromR2(url.slice(publicBase.length + 1));
+    }
+    const ep = process.env.R2_ENDPOINT?.replace(/\/$/, '');
+    const bucket = process.env.R2_BUCKET_NAME;
+    const prefix = `${ep}/${bucket}/`;
+    if (url.startsWith(prefix)) {
+      return deleteFromR2(url.slice(prefix.length));
+    }
+    return Promise.resolve(false);
   }
+
+  if (url.startsWith('/uploads/')) {
+    const name = path.basename(url);
+    try {
+      fs.unlinkSync(path.join(UPLOADS_DIR, name));
+      return Promise.resolve(true);
+    } catch {
+      return Promise.resolve(false);
+    }
+  }
+
+  return Promise.resolve(false);
 }
 
 module.exports = { UPLOADS_DIR, isAllowedMime, extForMime, mediaTypeFor, saveUpload, deleteUpload };

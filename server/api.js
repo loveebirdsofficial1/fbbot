@@ -123,7 +123,7 @@ router.post('/conversations/:id/reply', requireAuth, async (req, res) => {
 
 // Upload media for later use in a reply. Returns a URL that is sendable to FB/IG.
 router.post('/upload', requireAuth, (req, res) => {
-  upload.single('file')(req, res, (err) => {
+  upload.single('file')(req, res, async (err) => {
     if (err) {
       return res.status(400).json({ error: `Upload failed: ${err.message}` });
     }
@@ -133,8 +133,13 @@ router.post('/upload', requireAuth, (req, res) => {
     if (!isAllowedMime(req.file.mimetype)) {
       return res.status(400).json({ error: `File type not allowed: ${req.file.mimetype}` });
     }
-    const saved = saveUpload(req.file.buffer, req.file.originalname, req.file.mimetype);
-    res.json({ ok: true, url: saved.url, media_type: mediaTypeFor(req.file.mimetype) });
+    try {
+      const saved = await saveUpload(req.file.buffer, req.file.originalname, req.file.mimetype);
+      res.json({ ok: true, url: saved.url, media_type: mediaTypeFor(req.file.mimetype) });
+    } catch (e) {
+      console.error('Upload failed:', e.message);
+      res.status(500).json({ error: `Upload failed: ${e.message}` });
+    }
   });
 });
 
