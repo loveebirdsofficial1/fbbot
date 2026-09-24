@@ -18,6 +18,7 @@ const config = {
   appSecret: process.env.APP_SECRET || '',
 
   pageAccessToken: process.env.PAGE_ACCESS_TOKEN || '',
+  pageId: process.env.PAGE_ID || '',
   igAccessToken: process.env.IG_ACCESS_TOKEN || '',
   igAccountId: process.env.IG_ACCOUNT_ID || '',
   waAccessToken: process.env.WA_ACCESS_TOKEN || '',
