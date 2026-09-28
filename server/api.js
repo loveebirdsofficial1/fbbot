@@ -6,6 +6,8 @@ const config = require('./config');
 const db = require('./db');
 const { dispatchSend } = require('./services/send');
 const { saveUpload, isAllowedMime, mediaTypeFor } = require('./services/uploads');
+const { verifyToken, subscribeWebhook, subscribeAccount } = require('./services/connect');
+const { syncConnection } = require('./services/sync');
 const { broadcast } = require('./realtime');
 
 const router = express.Router();
@@ -71,6 +73,7 @@ router.get('/conversations', requireAuth, (req, res) => {
   const conversations = db.listConversations({
     status: req.query.status || 'all',
     channel: req.query.channel || 'all',
+    unread: req.query.unread === '1' || req.query.unread === 'true',
     limit: req.query.limit,
   });
   res.json({ conversations });
@@ -107,7 +110,7 @@ router.post('/conversations/:id/reply', requireAuth, async (req, res) => {
   }
 
   const attachment = mediaUrl ? { type: mediaType, url: mediaUrl } : null;
-  const result = await dispatchSend(conversation.channel, conversation.external_id, body, attachment);
+  const result = await dispatchSend(conversation, conversation.external_id, body, attachment);
 
   if (!result.ok) {
     return res.status(502).json({ error: result.error || 'Failed to send message' });
@@ -231,6 +234,180 @@ router.post('/conversations/:id/read', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ------------------------------------------------------------ connections
+// Facebook / Instagram / WhatsApp ki API credentials UI se add hoti hain.
+// Tokens DB me encrypted rehte hain (server/services/crypto.js).
+
+const CHANNELS = ['facebook', 'instagram', 'whatsapp'];
+
+function readConnectionInput(body) {
+  const channel = String(body.channel || '').toLowerCase();
+  if (!CHANNELS.includes(channel)) {
+    return { error: 'channel must be one of: facebook, instagram, whatsapp' };
+  }
+  const name = String(body.name || '').trim();
+  if (!name) return { error: 'name is required' };
+
+  const input = {
+    channel,
+    name,
+    appId: String(body.app_id || '').trim(),
+    accountId: String(body.account_id || '').trim(),
+    token: String(body.token || '').trim(),
+    verifyToken: String(body.verify_token || '').trim(),
+    apiHost: body.api_host === 'instagram' ? 'instagram' : 'facebook',
+    extra: {},
+  };
+
+  if (body.app_secret) input.appSecret = String(body.app_secret).trim();
+  if (body.wa_own_number) {
+    input.extra.wa_own_number = String(body.wa_own_number).replace(/\D/g, '');
+  }
+
+  // Channel ke hisaab se zaroori fields
+  if (channel === 'facebook' && !input.accountId) {
+    return { error: 'account_id (Page ID) is required for Facebook' };
+  }
+  if (channel === 'instagram' && !input.accountId) {
+    return { error: 'account_id (IG Account ID) is required for Instagram' };
+  }
+  if (channel === 'whatsapp' && !input.accountId) {
+    return { error: 'account_id (Phone Number ID) is required for WhatsApp' };
+  }
+  if (!input.token) return { error: 'token (access token) is required' };
+
+  return { input };
+}
+
+router.get('/connections', requireAuth, requireAdmin, (req, res) => {
+  res.json({ connections: db.listConnections() });
+});
+
+router.post('/connections', requireAuth, requireAdmin, (req, res) => {
+  const { input, error } = readConnectionInput(req.body || {});
+  if (error) return res.status(400).json({ error });
+
+  const created = db.createConnection(input);
+  broadcast('connections', {});
+  res.status(201).json({ connection: toPublic(created) });
+});
+
+router.patch('/connections/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const existing = db.getConnection(id);
+  if (!existing) return res.status(404).json({ error: 'Connection not found' });
+
+  const body = req.body || {};
+  const patch = {};
+  if (body.name !== undefined) patch.name = String(body.name).trim();
+  if (body.app_id !== undefined) patch.appId = String(body.app_id).trim();
+  if (body.account_id !== undefined) patch.accountId = String(body.account_id).trim();
+  if (body.api_host !== undefined) patch.apiHost = body.api_host === 'instagram' ? 'instagram' : 'facebook';
+  if (body.enabled !== undefined) patch.enabled = !!body.enabled;
+  if (body.verify_token !== undefined) patch.verifyToken = String(body.verify_token).trim();
+
+  // Sirf bheja gaya token replace karta hai; khaali chhorne par purana rehta hai
+  if (body.token) patch.token = String(body.token).trim();
+  if (body.app_secret) patch.appSecret = String(body.app_secret).trim();
+
+  const extra = { ...existing.extra };
+  if (body.wa_own_number !== undefined) {
+    extra.wa_own_number = String(body.wa_own_number).replace(/\D/g, '');
+  }
+  patch.extra = extra;
+
+  const updated = db.updateConnection(id, patch);
+  broadcast('connections', {});
+  res.json({ connection: toPublic(updated) });
+});
+
+router.delete('/connections/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const existing = db.getConnection(id);
+  if (!existing) return res.status(404).json({ error: 'Connection not found' });
+  db.deleteConnection(id);
+  broadcast('connections', {});
+  res.json({ ok: true });
+});
+
+// Token verify kar ke account ka naam/ID laata hai - UI me "Test" button.
+router.post('/connections/:id/verify', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const conn = db.getConnection(id);
+  if (!conn) return res.status(404).json({ error: 'Connection not found' });
+
+  const result = await verifyToken(conn.channel, conn);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+
+  res.json({ ok: true, account: result });
+});
+
+// Meta sirf public HTTPS callback maangta hai. Localhost/ngrok-free jaise
+// URLs par subscribe kaam nahi karta, is liye pehle hi rok dete hain - warna
+// Meta ka error message confuse karta hai.
+function normalizeCallbackUrl(raw) {
+  let url;
+  try {
+    url = new URL(String(raw).trim());
+  } catch {
+    return { error: 'callback_url aik valid URL nahi hai' };
+  }
+  if (url.protocol !== 'https:') {
+    return { error: 'callback_url HTTPS hona chahiye (Meta sirf public HTTPS accept karta hai)' };
+  }
+  const host = url.hostname.toLowerCase();
+  if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '[::1]') {
+    return { error: 'callback_url public hona chahiye - localhost Meta ke paas nahi chalta. ngrok ya hosting use karein.' };
+  }
+  if (host.endsWith('.local')) {
+    return { error: 'callback_url public hona chahiye - .local address Meta ke paas nahi chalta' };
+  }
+  return { value: url.origin + url.pathname.replace(/\/$/, '') };
+}
+
+// Meta app par webhook subscribe karwata hai.
+router.post('/connections/:id/subscribe', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const conn = db.getConnection(id);
+  if (!conn) return res.status(404).json({ error: 'Connection not found' });
+
+  const parsed = normalizeCallbackUrl((req.body && req.body.callback_url) || '');
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const callbackUrl = parsed.value;
+
+  // Account-level pehle (page/IG ko app se link karo), phir app-level webhook
+  const accountResult = await subscribeAccount(conn.channel, conn);
+  const hookResult = await subscribeWebhook(conn.channel, conn, callbackUrl);
+
+  if (!hookResult.ok) {
+    return res.status(400).json({
+      error: hookResult.error,
+      account_linked: accountResult.ok ? accountResult.success : false,
+    });
+  }
+
+  res.json({
+    ok: true,
+    account_linked: accountResult.ok ? accountResult.success : false,
+    account_error: accountResult.ok ? null : accountResult.error,
+    webhook: hookResult.message,
+    object: hookResult.object,
+  });
+});
+
+// Pehli se maujood (old) Facebook/Instagram conversations inbox me import karo.
+// Meta poori history nahi deta, lekin conversations list + last message
+// (snippet) mil jata hai - isi se old chats chat-column me dikhne lagti hain.
+router.post('/connections/:id/sync', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const conn = db.getConnection(id);
+  if (!conn) return res.status(404).json({ error: 'Connection not found' });
+
+  const result = await syncConnection(conn);
+  const status = result.error ? 400 : 200;
+  res.status(status).json({ ok: !result.error, result });
+});
+
 // -------------------------------------------------------------- admin: agents
 router.post('/auth/agents', requireAuth, requireAdmin, (req, res) => {
   const { name, email, password } = req.body || {};
@@ -240,6 +417,13 @@ router.post('/auth/agents', requireAuth, requireAdmin, (req, res) => {
   }
   res.json({ agent: db.createAgent(name, String(email).toLowerCase().trim(), password) });
 });
+
+// Saved connection ko API se bhejne se pehle token chhupa do.
+function toPublic(conn) {
+  if (!conn) return null;
+  const list = db.listConnections();
+  return list.find((c) => c.id === conn.id) || null;
+}
 
 router.delete('/auth/agents/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);

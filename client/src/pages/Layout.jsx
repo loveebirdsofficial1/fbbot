@@ -135,6 +135,7 @@ export default function Layout() {
           {isStaff ? (
             <>
               <Item to="/inbox" badge={unread}>Inbox</Item>
+              <Item to="/channels">Channels</Item>
               <Item to="/agents">Agents</Item>
             </>
           ) : (

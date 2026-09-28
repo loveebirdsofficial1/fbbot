@@ -66,10 +66,20 @@ export const api = {
   deleteAgent: (id) => request(`/auth/agents/${id}`, { method: 'DELETE' }),
   updateAgentPhoto: (id, photo) => request(`/auth/agents/${id}`, { method: 'PATCH', body: { photo } }),
 
+  connections: () => request('/connections'),
+  createConnection: (payload) => request('/connections', { method: 'POST', body: payload }),
+  updateConnection: (id, payload) => request(`/connections/${id}`, { method: 'PATCH', body: payload }),
+  deleteConnection: (id) => request(`/connections/${id}`, { method: 'DELETE' }),
+  verifyConnection: (id) => request(`/connections/${id}/verify`, { method: 'POST' }),
+  subscribeConnection: (id, callbackUrl) =>
+    request(`/connections/${id}/subscribe`, { method: 'POST', body: { callback_url: callbackUrl } }),
+  syncConnection: (id) => request(`/connections/${id}/sync`, { method: 'POST' }),
+
   conversations: (params = {}) => {
     const qs = new URLSearchParams();
     if (params.status && params.status !== 'all') qs.set('status', params.status);
     if (params.channel && params.channel !== 'all') qs.set('channel', params.channel);
+    if (params.unread) qs.set('unread', '1');
     return request(`/conversations?${qs.toString()}`);
   },
   conversation: (id) => request(`/conversations/${id}`),

@@ -1,10 +1,77 @@
 const config = require('../config');
+const db = require('../db');
 
-const FB_GRAPH = (path) =>
-  `https://graph.facebook.com/${config.graphVersion}/${path}`;
+// Do credential sources hain:
+//  1) UI se add ki hui connection (connections table)  -> priority
+//  2) .env fallback (purana setup, abhi bhi supported)
+// Conversation se linked connection pehle, warna channel ka pehla enabled
+// connection, phir .env.
 
-async function graphPost(path, accessToken, body) {
-  const url = `${FB_GRAPH(path)}?access_token=${encodeURIComponent(accessToken)}`;
+function resolveCredentials(channel, connectionId) {
+  let conn = null;
+  if (connectionId) conn = db.getConnection(connectionId);
+
+  // Webhook ke baad is conversation ko attach nahi hua? channel ka default lo.
+  if (!conn || !conn.enabled) {
+    conn = db.findConnectionForChannel(channel, null) || conn;
+  }
+
+  if (conn && conn.enabled) {
+    return {
+      source: 'connection',
+      connectionId: conn.id,
+      connectionName: conn.name,
+      token: conn.token || '',
+      accountId: conn.accountId || '',
+      appId: conn.appId || '',
+      appSecret: conn.appSecret || '',
+      apiHost: conn.apiHost || 'facebook',
+      extra: conn.extra || {},
+    };
+  }
+
+  // ---- .env fallback
+  if (channel === 'facebook') {
+    return {
+      source: 'env',
+      connectionId: null,
+      token: config.pageAccessToken,
+      accountId: config.pageId,
+      appSecret: config.appSecret,
+      apiHost: 'facebook',
+      extra: {},
+    };
+  }
+  if (channel === 'instagram') {
+    return {
+      source: 'env',
+      connectionId: null,
+      token: config.igAccessToken,
+      accountId: config.igAccountId,
+      appSecret: config.appSecret,
+      apiHost: 'instagram',
+      extra: {},
+    };
+  }
+  if (channel === 'whatsapp') {
+    return {
+      source: 'env',
+      connectionId: null,
+      token: config.waAccessToken,
+      accountId: config.waPhoneNumberId,
+      appSecret: config.appSecret,
+      apiHost: 'facebook',
+      extra: { wa_own_number: config.waOwnNumber },
+    };
+  }
+
+  return { source: 'none', connectionId: null, token: '', accountId: '', extra: {} };
+}
+
+const graphUrl = (host, path) => `https://graph.${host}.com/${config.graphVersion}/${path}`;
+
+async function graphPost(host, path, accessToken, body) {
+  const url = `${graphUrl(host, path)}?access_token=${encodeURIComponent(accessToken)}`;
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -17,89 +84,121 @@ async function graphPost(path, accessToken, body) {
   return { ok: true, data };
 }
 
-// Messenger and Instagram use the exact same "me/messages" send endpoint -
-// only the token differs (page token for Messenger, IG-scoped token for Instagram).
 function buildAttachmentMessage(attachment) {
   if (!attachment || !attachment.url) return null;
-  const typeMap = {
-    audio: 'audio',
-    video: 'video',
-    image: 'image',
-    document: 'file',
-  };
+  const typeMap = { audio: 'audio', video: 'video', image: 'image', document: 'file' };
   const type = typeMap[attachment.type] || 'file';
   return { attachment: { type, payload: { url: attachment.url } } };
 }
 
-async function sendMetaMessage(token, recipientId, text, attachment) {
-  const msg = buildAttachmentMessage(attachment) || { text };
-  return graphPost('me/messages', token, {
+// Messenger aur Instagram ka send endpoint bilkul same hai ("me/messages").
+// Sirf host aur token alag hote hain.
+async function sendMetaMessage(creds, recipientId, text, attachment) {
+  if (!creds.token) return { ok: false, error: 'No access token configured for this channel' };
+  const host = creds.apiHost === 'instagram' ? 'instagram' : 'facebook';
+  return graphPost(host, 'me/messages', creds.token, {
     recipient: { id: recipientId },
-    message: msg,
+    message: buildAttachmentMessage(attachment) || { text },
   });
 }
 
-// Messenger uses the "me/messages" endpoint with a Page token.
-function sendFacebook(psid, text, attachment) {
-  return sendMetaMessage(config.pageAccessToken, psid, text, attachment);
+function sendFacebook(creds, psid, text, attachment) {
+  return sendMetaMessage(creds, psid, text, attachment);
 }
 
-// Instagram (Instagram API with Instagram Login) uses graph.instagram.com
-// with the IGAA token and the IG account id as the sending node.
-async function sendInstagram(igsid, text, attachment) {
-  if (!config.igAccessToken || !config.igAccountId) {
-    return { ok: false, error: 'Instagram not configured (IG_ACCESS_TOKEN / IG_ACCOUNT_ID)' };
+function sendInstagram(creds, igsid, text, attachment) {
+  if (!creds.accountId) {
+    return { ok: false, error: 'Instagram account id (IG account ID) is required to send' };
   }
-  const url = `https://graph.instagram.com/${config.graphVersion}/${config.igAccountId}/messages?access_token=${encodeURIComponent(config.igAccessToken)}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  if (!creds.token) return { ok: false, error: 'No Instagram access token configured' };
+  const host = creds.apiHost === 'instagram' ? 'instagram' : 'facebook';
+  // Instagram Login (graph.instagram.com) me account id node ke aage lagta
+  // hai, FB-hosted IG me "me" kaafi hai - dono try karte hain.
+  if (host === 'instagram') {
+    return graphPost(host, `${creds.accountId}/messages`, creds.token, {
       recipient: { id: igsid },
       message: buildAttachmentMessage(attachment) || { text },
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.error) {
-    return { ok: false, error: (data.error && data.error.message) || `HTTP ${res.status}` };
+    });
   }
-  return { ok: true, data };
+  return sendMetaMessage(creds, igsid, text, attachment);
 }
 
-async function sendWhatsApp(to, text) {
-  const url = FB_GRAPH(`${config.waPhoneNumberId}/messages`);
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.waAccessToken}`,
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to,
-      type: 'text',
-      text: { body: text },
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.error) {
-    return { ok: false, error: (data.error && data.error.message) || `HTTP ${res.status}` };
+async function sendWhatsApp(creds, to, text, attachment) {
+  if (!creds.accountId) {
+    return { ok: false, error: 'WhatsApp Phone Number ID is required to send' };
   }
-  return { ok: true, data };
+  if (!creds.token) return { ok: false, error: 'No WhatsApp access token configured' };
+
+  const payload = attachment
+    ? {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: attachment.type === 'image' ? 'image' : 'document',
+        [attachment.type === 'image' ? 'image' : 'document']: { link: attachment.url },
+      }
+    : {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'text',
+        text: { body: text },
+      };
+
+  return graphPost('facebook', `${creds.accountId}/messages`, creds.token, payload);
 }
 
-function dispatchSend(channel, externalId, text, attachment) {
+// channel + optional conversation ka data. Purana call signature
+// (channel, externalId, ...) bhi chal raha hai taake koi purana caller na toote.
+function dispatchSend(channelOrConversation, externalId, text, attachment) {
+  let channel = channelOrConversation;
+  let connectionId = null;
+  if (channelOrConversation && typeof channelOrConversation === 'object') {
+    channel = channelOrConversation.channel;
+    connectionId = channelOrConversation.connection_id || null;
+  }
+
+  const creds = resolveCredentials(channel, connectionId);
+
   switch (channel) {
     case 'facebook':
-      return sendFacebook(externalId, text, attachment);
+      return sendFacebook(creds, externalId, text, attachment);
     case 'instagram':
-      return sendInstagram(externalId, text, attachment);
+      return sendInstagram(creds, externalId, text, attachment);
     case 'whatsapp':
-      return sendWhatsApp(externalId, text);
+      return sendWhatsApp(creds, externalId, text, attachment);
     default:
       return Promise.resolve({ ok: false, error: `Unknown channel: ${channel}` });
   }
 }
 
-module.exports = { dispatchSend, sendFacebook, sendInstagram, sendWhatsApp };
+// Channel ka page/IG account/WABA naam pata karne ke liye (UI me dikhane ke liye).
+async function describeAccount(channel, connectionId) {
+  const creds = resolveCredentials(channel, connectionId);
+  if (!creds.token) return { ok: false, error: 'No token configured' };
+  try {
+    const host = creds.apiHost === 'instagram' ? 'instagram' : 'facebook';
+    const node = creds.accountId || 'me';
+    const res = await fetch(
+      `${graphUrl(host, node)}?fields=id,name,username&access_token=${encodeURIComponent(creds.token)}`
+    );
+    const data = await res.json();
+    if (data.error) return { ok: false, error: data.error.message };
+    return {
+      ok: true,
+      id: data.id || creds.accountId || null,
+      name: data.name || data.username || null,
+      username: data.username || null,
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+module.exports = {
+  dispatchSend,
+  resolveCredentials,
+  describeAccount,
+  graphUrl,
+  buildAttachmentMessage,
+};

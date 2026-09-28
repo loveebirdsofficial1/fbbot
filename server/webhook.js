@@ -7,11 +7,23 @@ const { broadcast } = require('./realtime');
 
 const router = express.Router();
 
-const secrets = (config.appSecret || '').split(',').map((s) => s.trim()).filter(Boolean);
+// Secrets .env se bhi aa sakte hain aur UI-added connections se bhi. Har app
+// ki apni signature hoti hai, is liye sab accept karni padti hain.
 const relaxSig = process.env.WEBHOOK_SIG_RELAX === 'true';
+
+function allSecrets() {
+  const fromEnv = (config.appSecret || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const fromDb = db.listAllAppSecrets();
+  return [...new Set([...fromEnv, ...fromDb])];
+}
+
+function allVerifyTokens() {
+  return [...new Set([config.verifyToken, ...db.listAllVerifyTokens()].filter(Boolean))];
+}
 
 function verifyHubSignature(req) {
   const sig = req.get('x-hub-signature-256');
+  const secrets = allSecrets();
   if (!secrets.length || !sig) return true;
   const raw = req.rawBody || JSON.stringify(req.body);
   for (const secret of secrets) {
@@ -21,7 +33,6 @@ function verifyHubSignature(req) {
       .digest('hex');
     if (`sha256=${expected}` === sig) return true;
   }
-  console.warn(`[webhook] SIG-MISMATCH in=${sig} computed=[${secrets.map((s) => `${s.slice(0,8)}...:sha256=${crypto.createHmac('sha256', s).update(raw).digest('hex')}`).join(' | ')}]`);
   if (relaxSig) {
     console.warn('[webhook] WEBHOOK_SIG_RELAX=true -> accepting without valid signature');
     return true;
@@ -35,7 +46,7 @@ router.get('/', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === config.verifyToken) {
+  if (mode === 'subscribe' && allVerifyTokens().includes(token)) {
     console.log('[webhook] Subscription verified');
     return res.status(200).send(challenge);
   }
@@ -53,7 +64,7 @@ function messageBodyFromMessagingEvent(msg) {
 }
 
 // messenger-style payload (object: 'page' | 'instagram')
-async function ingestMessaging(object, event) {
+async function ingestMessaging(object, event, accountId) {
   const msg = event.message || event.postback || {};
   if (msg.is_echo) return; // outbound copy - ignore
 
@@ -63,9 +74,13 @@ async function ingestMessaging(object, event) {
   const extId = (event.sender && event.sender.id) || null;
   if (!extId) return;
 
+  // Is page/IG account ki connection dhoondo taake reply usi token se jaye.
+  // (Aik page ka token doosre page ki conversation me use nahi hoga.)
+  const connection = db.findConnectionForChannel(channel, accountId);
+
   let info = { name: extId, photo: null };
   try {
-    info = await resolveContact(channel, extId);
+    info = await resolveContact(channel, extId, connection && connection.id);
   } catch {
     /* keep fallback */
   }
@@ -77,6 +92,7 @@ async function ingestMessaging(object, event) {
     externalId: extId,
     contactName: info.name,
     photo: info.photo,
+    connectionId: connection && connection.id,
   });
 
   db.incrementUnread(conversation.id, false);
@@ -138,6 +154,14 @@ async function ingestMessaging(object, event) {
 }
 
 function ingestWhatsApp(entry) {
+  // entry.id WABA ID hota hai, hamari connection me phone number ID stored hai.
+  // Is liye WABA id se match karne ki koshish karte hain, warna default.
+  const accountId = entry.id;
+  const connection = db.findConnectionForChannel('whatsapp', accountId);
+  const ownNumber = String(
+    (connection && connection.extra && connection.extra.wa_own_number) || config.waOwnNumber || ''
+  ).replace(/\D/g, '');
+
   for (const change of entry.changes || []) {
     const value = change.value || {};
     const messages = Array.isArray(value.messages) ? value.messages : [];
@@ -147,7 +171,7 @@ function ingestWhatsApp(entry) {
 
     for (const msg of messages) {
       const from = msg.from;
-      if (!from || (config.waOwnNumber && from.replace(/\D/g, '') === config.waOwnNumber)) {
+      if (!from || (ownNumber && from.replace(/\D/g, '') === ownNumber)) {
         continue; // echo of our own outbound message
       }
 
@@ -158,6 +182,7 @@ function ingestWhatsApp(entry) {
         channel: 'whatsapp',
         externalId: from,
         contactName: name,
+        connectionId: connection && connection.id,
       });
 
       db.incrementUnread(conversation.id, false);
@@ -207,9 +232,11 @@ router.post('/', express.raw({ type: ['application/json', 'application/*+json'] 
       for (const entry of payload.entry || []) ingestWhatsApp(entry);
     } else if (object === 'page' || object === 'instagram') {
       for (const entry of payload.entry || []) {
+        // entry.id = page ID ya IG account ID: is se sahi connection milti hai
+        const accountId = entry.id;
         entry.messaging = entry.messaging || [];
         for (const event of entry.messaging) {
-          await ingestMessaging(object, event);
+          await ingestMessaging(object, event, accountId);
         }
       }
     } else {

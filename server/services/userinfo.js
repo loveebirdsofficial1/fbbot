@@ -1,24 +1,33 @@
 const config = require('../config');
+const { resolveCredentials, graphUrl } = require('./send');
 
-// Best-effort contact identity lookup. Falls back to the id on any failure.
-async function resolveContact(channel, externalId) {
+// Best-effort contact identity lookup. Kisi bhi failure par id hi naam ban jata hai.
+async function resolveContact(channel, externalId, connectionId) {
+  const creds = resolveCredentials(channel, connectionId);
+  if (!creds.token) return { name: externalId, photo: null };
+
   try {
-    if (channel === 'facebook' && config.pageAccessToken) {
+    if (channel === 'facebook') {
       const res = await fetch(
-        `https://graph.facebook.com/${config.graphVersion}/${externalId}?fields=name,profile_pic&access_token=${encodeURIComponent(config.pageAccessToken)}`
+        `${graphUrl('facebook', externalId)}?fields=name,profile_pic&access_token=${encodeURIComponent(creds.token)}`
       );
       const data = await res.json();
       if (data && (data.name || data.profile_pic)) {
         return { name: data.name || externalId, photo: data.profile_pic || null };
       }
-      // Direct PSID lookup can fail (dev-mode app / expired PSID). Messenger
-      // still exposes the participant name through the page conversations edge.
-      const viaConv = await facebookNameFromConversations(externalId);
+      // Direct PSID lookup fail ho sakta hai (dev-mode app / expired PSID).
+      // Messenger page-conversations edge se participant name de deta hai.
+      const viaConv = await facebookNameFromConversations(creds, externalId);
       if (viaConv) return { name: viaConv, photo: null };
     }
-    if (channel === 'instagram' && config.igAccessToken) {
+
+    if (channel === 'instagram') {
+      const host = creds.apiHost === 'instagram' ? 'instagram' : 'facebook';
+      // Instagram Login wale accounts graph.instagram.com par scoped user node
+      // se resolve hote hain; FB-hosted IG par direct scoped-user lookup chalta hai.
+      const node = host === 'instagram' && creds.accountId ? `${creds.accountId}` : externalId;
       const res = await fetch(
-        `https://graph.instagram.com/${config.graphVersion}/${externalId}?fields=username,name,profile_pic&access_token=${encodeURIComponent(config.igAccessToken)}`
+        `${graphUrl(host, node)}?fields=username,name,profile_pic&access_token=${encodeURIComponent(creds.token)}`
       );
       const data = await res.json();
       if (data && (data.username || data.name)) {
@@ -32,20 +41,33 @@ async function resolveContact(channel, externalId) {
       }
     }
   } catch {
-    // ignore - network errors are fine, we keep the fallback name
+    // network error - fallback name chalega
   }
   return { name: externalId, photo: null };
 }
 
-let fbParticipantsCache = { at: 0, byId: {}, byEmail: {} };
+// Multiple Facebook pages ho sakti hain, is liye cache per-page key hoti hai
+// warna ek page ka data doosre pe leak ho jayega.
+const fbCache = new Map();
 
-async function facebookNameFromConversations(externalId) {
-  if (!config.pageId || !config.pageAccessToken) return null;
-  if (Date.now() - fbParticipantsCache.at < 5 * 60 * 1000) {
-    return fbParticipantsCache.byId[externalId] || fbParticipantsCache.byEmail[`${externalId}@facebook.com`] || null;
+async function facebookNameFromConversations(creds, externalId) {
+  if (!creds.accountId || !creds.token) return null;
+  const key = `${creds.connectionId || 'env'}:${creds.accountId}`;
+
+  const cached = fbCache.get(key);
+  if (!cached || Date.now() - cached.at > 5 * 60 * 1000) {
+    const fetched = await loadParticipants(creds);
+    if (!fetched) return null;
+    fbCache.set(key, { at: Date.now(), ...fetched });
   }
+
+  const map = fbCache.get(key);
+  return map.byId[externalId] || map.byEmail[`${externalId}@facebook.com`] || null;
+}
+
+async function loadParticipants(creds) {
   try {
-    let next = `https://graph.facebook.com/${config.graphVersion}/${config.pageId}/conversations?fields=participants{name,id,email}&limit=100&access_token=${encodeURIComponent(config.pageAccessToken)}`;
+    let next = `${graphUrl('facebook', `${creds.accountId}/conversations`)}?fields=participants{name,id,email}&limit=100&access_token=${encodeURIComponent(creds.token)}`;
     const map = { byId: {}, byEmail: {} };
     const seen = new Set();
     while (next && seen.size < 500) {
@@ -54,23 +76,21 @@ async function facebookNameFromConversations(externalId) {
       if (data.error) break;
       for (const c of data.data || []) {
         for (const p of (c.participants && c.participants.data) || []) {
-          if (!p || p.id === config.pageId) continue;
+          if (!p || p.id === creds.accountId) continue;
           map.byId[p.id] = p.name;
           if (p.email) map.byEmail[p.email] = p.name;
         }
       }
       next = data.paging && data.paging.next ? data.paging.next : null;
     }
-    fbParticipantsCache = { at: Date.now(), ...map };
-    return map.byId[externalId] || map.byEmail[`${externalId}@facebook.com`] || null;
+    return map;
   } catch {
     return null;
   }
 }
 
-// Keep resolveContactName for compatibility (used by callers needing only a name).
-async function resolveContactName(channel, externalId) {
-  const info = await resolveContact(channel, externalId);
+async function resolveContactName(channel, externalId, connectionId) {
+  const info = await resolveContact(channel, externalId, connectionId);
   return info.name;
 }
 

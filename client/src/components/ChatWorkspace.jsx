@@ -10,9 +10,20 @@ const MAX_LIST_WIDTH = 640;
 const LIST_WIDTH_KEY = 'inbox-list-width';
 const AUTO_REFRESH_MS = 10000;
 
+// Inbox tabs: All aur Unread ke sath status filters. "Unread" backend se
+// query hota hai (c.unread > 0); status filters bhi API ke through.
+const TABS = [
+  { key: 'all', label: 'All', status: 'all', unread: false },
+  { key: 'unread', label: 'Unread', status: 'all', unread: true },
+  { key: 'open', label: 'Open', status: 'open', unread: false },
+  { key: 'pending', label: 'Pending', status: 'pending', unread: false },
+  { key: 'resolved', label: 'Resolved', status: 'resolved', unread: false },
+];
+
 export default function ChatWorkspace({ agentView = false }) {
   const { user } = useAuth();
   const isStaff = user && user.role === 'admin';
+  const [activeTab, setActiveTab] = useState('all');
   const [conversations, setConversations] = useState([]);
   const [agents, setAgents] = useState([]);
   const [search, setSearch] = useState('');
@@ -34,6 +45,18 @@ export default function ChatWorkspace({ agentView = false }) {
   const listWidthRef = useRef(listWidth);
   const activeIdRef = useRef(null);
   activeIdRef.current = activeId;
+
+  const activeTabDef = TABS.find((t) => t.key === activeTab) || TABS[0];
+  const filterRef = useRef(activeTabDef);
+  filterRef.current = activeTabDef;
+
+  // Kya conversation current tab ke filter ko match karti hai?
+  function matchesTab(conversation) {
+    const f = filterRef.current;
+    if (f.unread && !(conversation.unread > 0)) return false;
+    if (f.status !== 'all' && conversation.status !== f.status) return false;
+    return true;
+  }
 
   function startListResize(e) {
     e.preventDefault();
@@ -64,7 +87,9 @@ export default function ChatWorkspace({ agentView = false }) {
       next[idx] = { ...next[idx], ...conversation };
     }
     if (agentView) next = next.filter((c) => c.assigned_agent_id === user?.id);
-    return next.sort((a, b) => (b.last_message_at || 0) - (a.last_message_at || 0));
+    return next
+      .filter(matchesTab)
+      .sort((a, b) => (b.last_message_at || 0) - (a.last_message_at || 0));
   }
 
   function mergeMessages(prev, incoming) {
@@ -81,7 +106,7 @@ export default function ChatWorkspace({ agentView = false }) {
         setMessages(list);
         setActive(conversation);
         setConversations((prev) =>
-          prev.map((c) => (c.id === id ? { ...c, unread: 0 } : c))
+          prev.map((c) => (c.id === id ? { ...c, unread: 0 } : c)).filter(matchesTab)
         );
         api.markRead(id).catch(() => {});
       } catch (e) {
@@ -96,11 +121,17 @@ export default function ChatWorkspace({ agentView = false }) {
       const { silent = false } = opts;
       if (!silent) setRefreshing(true);
       try {
-        const { conversations: list } = await api.conversations();
+        const f = filterRef.current;
+        const { conversations: list } = await api.conversations({
+          status: f.status,
+          unread: f.unread,
+        });
         setConversations((prev) => {
           let next = list;
           if (agentView) next = list.filter((c) => c.assigned_agent_id === user?.id);
-          return [...next].sort((a, b) => (b.last_message_at || 0) - (a.last_message_at || 0));
+          return [...next]
+            .filter((c) => matchesTab(c))
+            .sort((a, b) => (b.last_message_at || 0) - (a.last_message_at || 0));
         });
         if (activeIdRef.current) {
           try {
@@ -123,26 +154,46 @@ export default function ChatWorkspace({ agentView = false }) {
   );
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
         setError(null);
-        const { conversations: list } = await api.conversations();
+        const f = filterRef.current;
+        const { conversations: list } = await api.conversations({
+          status: f.status,
+          unread: f.unread,
+        });
         const filtered = agentView ? list.filter((c) => c.assigned_agent_id === user?.id) : list;
         const sorted = [...filtered].sort((a, b) => (b.last_message_at || 0) - (a.last_message_at || 0));
+        if (cancelled) return;
         setConversations(sorted);
-        if (sorted.length) await select(sorted[0].id);
+        if (sorted.length && !f.unread) {
+          const snap = await api.conversation(sorted[0].id);
+          if (cancelled) return;
+          setActiveId(sorted[0].id);
+          setMessages(snap.messages);
+          setActive(snap.conversation);
+          api.markRead(sorted[0].id).catch(() => {});
+        } else if (!agentView) {
+          setActiveId(null);
+          setActive(null);
+          setMessages([]);
+        }
       } catch (e) {
-        setError('Conversations load nahi ho saki.');
+        if (!cancelled) setError('Conversations load nahi ho saki.');
         console.error(e);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
     if (!agentView) {
       api.agents().then(({ agents: list }) => setAgents(list)).catch(() => {});
     }
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentView]);
+  }, [activeTab, agentView]);
 
   useEffect(() => {
     const t = setInterval(() => refresh({ silent: true }), AUTO_REFRESH_MS);
@@ -343,6 +394,22 @@ export default function ChatWorkspace({ agentView = false }) {
               </button>
             )}
           </div>
+        </div>
+        <div className="flex items-center gap-1 overflow-x-auto border-b border-slate-200 px-2 py-1.5">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setActiveTab(t.key)}
+              className={`whitespace-nowrap rounded-lg px-3 py-1 text-xs font-semibold transition ${
+                activeTab === t.key
+                  ? 'bg-brand text-white shadow-sm'
+                  : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
         </div>
         <div className="flex-1 overflow-y-auto">
           {loading && <p className="p-4 text-sm text-slate-500">Loading...</p>}

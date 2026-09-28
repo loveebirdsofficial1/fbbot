@@ -10,6 +10,7 @@ hain, is liye ek hi Meta App + ek hi webhook URL kaam karti hai.
 - **Frontend**: React + Vite
 - **Realtime**: Server-Sent Events (messages turant aate hain)
 - **Auth**: JWT (agents ke liye alag logins)
+- **Token storage**: AES-256-GCM encrypted (DB me)
 
 ## Requirement
 
@@ -23,20 +24,91 @@ hain, is liye ek hi Meta App + ek hi webhook URL kaam karti hai.
 # 1) dependencies
 npm install
 
-# 2) env file banao (already exists in this copy)
+# 2) env file banao (optional - ab tokens UI se bhi add hote hain)
 copy .env.example .env      # Windows
-# .env mein apne tokens daalo
 
 # 3) server + client
 npm run dev:server          # terminal 1 - backend (port 4000)
 npm run dev:client          # terminal 2 - frontend (port 5173)
 
-# ya sirf production build wala UI (political - ek hi port)
+# ya sirf production build wala UI (production - ek hi port)
 npm run build
 npm start                   # http://localhost:4000
 ```
 
 Login: `admin@omnichannel.local` / `admin123` (pehli dafa se automatically bana diya jata hai).
+
+---
+
+## Channels page — API keys add karna (recommended tareeqa)
+
+`.env` chherne ki zaroorat nahi. Login ke baad sidebar se **Channels** kholein:
+
+1. Facebook / Instagram / WhatsApp tab chunein
+2. Naam, account ID aur access token bhar dein
+3. **Add connection** dabayein
+4. **Test token** se verify karein ke token aur account ID sahi hain
+5. **Subscribe on Meta** se webhook khud subscribe karwa dein
+
+Har channel ki **kai** connections ban sakti hain — alag alag pages, alag IG
+accounts, alag WhatsApp numbers. Inbox mein sab aik jagah aate hain, aur har
+conversation usi connection se reply bhejti hai jis page/number se aayi thi.
+
+### Purani (old) conversations import — "Old chats sync"
+
+Webhook se sirf **naye** messages aate hain. Meta poori message history ki API
+nahi deta, lekin Facebook/Instagram account ki **conversations list + last
+message (snippet)** zaroor milta hai. Inhe import karne ke liye:
+
+1. **Channels** page kholein
+2. Facebook/Instagram connection par **"Old chats sync"** button dabayein
+3. Chats inbox mein aa jati hain — contact naam, last message, aur sahi
+   connection ke saath
+
+- Dobara sync kartay hain to **duplicate nahi** banta (meta_id se dedupe)
+- Imported chats **unread=0** rakhti hain (ye purani batcheet hai jo ab dekh
+  rahe hain — naye webhook messages normal unread rakhte hain)
+- Purani thread ka sirf last message (snippet) dekhne milta hai; poori history
+  har Meta app ke liye API se band hai
+- **WhatsApp** par history API hai hi nahi — wahan sirf naye messages aate hain
+
+### Tokens secure hain
+
+- Tokens database me **AES-256-GCM** se encrypt hote hain (key `JWT_SECRET` se
+  derive hoti hai), plain text me kabhi nahi likhe jate.
+- API har baar sirf **masked** token bhejta hai (`EAABwz••••fXYZ`). Poora token
+  browser ko kabhi nahi jata — sirf wo jagah likh sakte hain jahan pehle se
+  maujood hai.
+- Sirf **admin** role connections dekh/edit kar sakta hai.
+
+> ⚠️ `JWT_SECRET` production me strong aur **stable** rakhna zaroori hai. Agar
+  aap ise change karte hain to purane encrypted tokens decrypt nahi honge aur
+  un channels ko dobara add karna parega.
+
+### Webhook ke liye public URL
+
+`Subscribe on Meta` sirf tab kaam karta hai jab server ka **public HTTPS URL**
+ho — `localhost` par Meta request nahi bhej sakta. Local development ke liye:
+
+```bash
+ngrok http 4000
+# mil jayega: https://xxxx.ngrok-free.app
+```
+
+Us URL ka `/webhook` suffix laga kar Channels page ke "Webhook callback URL"
+mein daalein, phir **Subscribe on Meta** dabayein. Server khud:
+
+1. Page/IG ko app se link karta hai (`/subscribed_apps`)
+2. App ka webhook `/webhook` par set karta hai (`messages` field ke saath)
+
+Callback URL aur Verify token dono wahi dene hain jo aap UI mein likh rahe hain.
+
+---
+
+## Purana tareeqa — `.env` se connect karna (ab bhi chalta hai)
+
+UI wala tareeqa behtar hai, lekin `.env` fallback bhi supported hai (jo token
+DB me nahi milta, wahi use hota hai). Naam ke hisaab se:
 
 ---
 
@@ -132,6 +204,13 @@ WA_OWN_NUMBER=<apna_number_without_+55 e.g. 15551234567>
 | POST | `/api/conversations/:id/reply` | reply bhejo |
 | POST | `/api/conversations/:id/status` | status badlo |
 | POST | `/api/conversations/:id/assign` | agent assign |
+| GET | `/api/connections` | channels list (admin, tokens masked) |
+| POST | `/api/connections` | nayi connection add karo (admin) |
+| PATCH | `/api/connections/:id` | connection update (admin) |
+| DELETE | `/api/connections/:id` | connection delete (admin) |
+| POST | `/api/connections/:id/verify` | token verify karo (admin) |
+| POST | `/api/connections/:id/subscribe` | Meta par webhook subscribe (admin) |
+| POST | `/api/connections/:id/sync` | purani conversations import karo (admin) |
 | GET | `/api/stream` | SSE realtime |
 
 ## Security notes
@@ -139,4 +218,7 @@ WA_OWN_NUMBER=<apna_number_without_+55 e.g. 15551234567>
 - `.env` kabhi kisi ke saath share nahi karna (gitignored hai)
 - Page token short-lived hota hai — 60 din mein refresh karna parhta hai
 - `APP_SECRET` set karo taake webhook signature verify ho (extra protection)
-- Production: `JWT_SECRET` strong rakhna, admin password zaroor change karna
+- Production: `JWT_SECRET` strong rakhna, admin password zoroor change karna
+- `JWT_SECRET` badalne par DB ke purane encrypted tokens unlock nahi honge —
+  un channels ko dobara add karna parega
+- Tokens sirf admin role dekh/edit kar sakta hai, aur API masked copy bhejti hai

@@ -82,11 +82,28 @@ if (fs.existsSync(clientDist)) {
   });
 }
 
+function printStatus() {
+  const conns = db.listConnections();
+  console.log('[server] UI connections:');
+  if (!conns.length) {
+    console.log('  (koi nahi - Channels page se add karein)');
+  } else {
+    for (const c of conns) {
+      const state = c.enabled ? (c.has_token ? 'active' : 'MISSING TOKEN') : 'disabled';
+      console.log(`  - [${c.channel}] ${c.name} (id ${c.id}) -> ${state}`);
+    }
+  }
+  console.log('[server] .env fallback tokens:');
+  console.log(`  - Facebook: ${config.pageAccessToken ? 'configured' : 'not set'}`);
+  console.log(`  - Instagram: ${config.igAccessToken ? 'configured' : 'not set'}`);
+  console.log(`  - WhatsApp: ${config.waAccessToken ? 'configured' : 'not set'}`);
+}
+
 app.listen(config.port, () => {
   console.log(`[server] Omnichannel inbox running on http://localhost:${config.port}`);
   console.log(`[server] Webhook URL:   http://<your-public-host>/webhook`);
-  console.log('[server] Channel status:');
-  console.log(`  - Facebook Messenger token: ${config.pageAccessToken ? 'configured' : 'NOT SET'}`);
-  console.log(`  - Instagram token:          ${config.igAccessToken ? 'configured' : 'NOT SET'}`);
-  console.log(`  - WhatsApp token:           ${config.waAccessToken ? 'configured' : 'NOT SET'}`);
+  printStatus();
 });
+
+// .env ke bina bhi chal sake (deploy par), config load hone ke baad
+process.on('SIGHUP', printStatus);

@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const bcrypt = require('bcryptjs');
 const config = require('./config');
+const { encrypt, decrypt, mask } = require('./services/crypto');
 
 fs.mkdirSync(path.dirname(config.dbFile), { recursive: true });
 const db = new DatabaseSync(config.dbFile);
@@ -48,6 +49,24 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS connections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel TEXT NOT NULL,
+  name TEXT NOT NULL,
+  app_id TEXT,
+  app_secret_enc TEXT,
+  account_id TEXT,
+  token_enc TEXT,
+  verify_token_enc TEXT,
+  api_host TEXT NOT NULL DEFAULT 'facebook',
+  extra TEXT NOT NULL DEFAULT '{}',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_conn_channel ON connections(channel, enabled);
 `);
 
 // -------------------------------------------------- additive migrations
@@ -77,6 +96,9 @@ if (!msgCols.includes('sender')) {
 }
 if (!msgCols.includes('reply_to_id')) {
   db.exec(`ALTER TABLE messages ADD COLUMN reply_to_id INTEGER`);
+}
+if (!convCols.includes('connection_id')) {
+  db.exec(`ALTER TABLE conversations ADD COLUMN connection_id INTEGER REFERENCES connections(id)`);
 }
 db.prepare(`UPDATE agents SET role = 'admin' WHERE email = ?`).run(config.adminEmail);
 
@@ -122,8 +144,185 @@ function deleteAgent(id) {
   return db.prepare('DELETE FROM agents WHERE id = ?').run(id);
 }
 
+// ------------------------------------------------------- connections
+// Connection = aik channel ka aik live account (page / IG account / WA number).
+// Tokens encrypt karke rakhe jate hain; UI ko sirf masked copy jata hai.
+
+const CONNECTION_FIELDS =
+  'id, channel, name, app_id, account_id, api_host, extra, enabled, created_at, updated_at';
+
+// UI ke liye: secrets decrypt karke masked bhejte hain (koi token leak na ho).
+function publicConnection(row) {
+  if (!row) return null;
+  const token = decrypt(row.token_enc);
+  const appSecret = decrypt(row.app_secret_enc);
+  const verifyToken = decrypt(row.verify_token_enc);
+  let extra = {};
+  try {
+    extra = JSON.parse(row.extra || '{}');
+  } catch {
+    extra = {};
+  }
+  return {
+    id: row.id,
+    channel: row.channel,
+    name: row.name,
+    app_id: row.app_id || null,
+    account_id: row.account_id || null,
+    api_host: row.api_host,
+    enabled: !!row.enabled,
+    extra,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    has_token: !!token,
+    token_masked: mask(token),
+    has_app_secret: !!appSecret,
+    app_secret_masked: mask(appSecret, { head: 4, tail: 2 }),
+    has_verify_token: !!verifyToken,
+    verify_token_masked: verifyToken || null, // yeh user khud banata hai, secret nahi
+    missing: ['token'].filter((k) => !token),
+  };
+}
+
+// Server ke andar use: asli (decrypted) values.
+function resolvedConnection(row) {
+  if (!row) return null;
+  let extra = {};
+  try {
+    extra = JSON.parse(row.extra || '{}');
+  } catch {
+    extra = {};
+  }
+  return {
+    id: row.id,
+    channel: row.channel,
+    name: row.name,
+    appId: row.app_id || '',
+    appSecret: decrypt(row.app_secret_enc) || '',
+    accountId: row.account_id || '',
+    token: decrypt(row.token_enc) || '',
+    verifyToken: decrypt(row.verify_token_enc) || '',
+    apiHost: row.api_host || 'facebook',
+    enabled: !!row.enabled,
+    extra,
+  };
+}
+
+function listConnections() {
+  return db
+    .prepare(`SELECT * FROM connections ORDER BY channel, created_at`)
+    .all()
+    .map(publicConnection);
+}
+
+function getConnection(id) {
+  return resolvedConnection(db.prepare('SELECT * FROM connections WHERE id = ?').get(id));
+}
+
+function getConnectionRow(id) {
+  return db.prepare('SELECT * FROM connections WHERE id = ?').get(id);
+}
+
+function createConnection(input) {
+  const t = now();
+  const r = db
+    .prepare(
+      `INSERT INTO connections
+        (channel, name, app_id, app_secret_enc, account_id, token_enc, verify_token_enc, api_host, extra, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      input.channel,
+      input.name,
+      input.appId || null,
+      encrypt(input.appSecret),
+      input.accountId || null,
+      encrypt(input.token),
+      encrypt(input.verifyToken),
+      input.apiHost || 'facebook',
+      JSON.stringify(input.extra || {}),
+      input.enabled === false ? 0 : 1,
+      t,
+      t
+    );
+  return getConnection(Number(r.lastInsertRowid));
+}
+
+// PATCH: sirf bheji hui fields update hoti hain. Token bheja gaya to replace,
+// warna purana encrypted value waise hi rehta hai (UI se masked value aata hai).
+function updateConnection(id, patch) {
+  const current = getConnectionRow(id);
+  if (!current) return null;
+
+  const fields = [];
+  const params = [];
+  const put = (col, value) => {
+    fields.push(`${col} = ?`);
+    params.push(value);
+  };
+
+  if (patch.name !== undefined) put('name', patch.name);
+  if (patch.appId !== undefined) put('app_id', patch.appId || null);
+  if (patch.appSecret) put('app_secret_enc', encrypt(patch.appSecret));
+  if (patch.accountId !== undefined) put('account_id', patch.accountId || null);
+  if (patch.token) put('token_enc', encrypt(patch.token));
+  if (patch.verifyToken !== undefined) {
+    put('verify_token_enc', patch.verifyToken ? encrypt(patch.verifyToken) : null);
+  }
+  if (patch.apiHost !== undefined) put('api_host', patch.apiHost || 'facebook');
+  if (patch.extra !== undefined) put('extra', JSON.stringify(patch.extra || {}));
+  if (patch.enabled !== undefined) put('enabled', patch.enabled ? 1 : 0);
+
+  fields.push('updated_at = ?');
+  params.push(now());
+  params.push(id);
+
+  db.prepare(`UPDATE connections SET ${fields.join(', ')} WHERE id = ?`).run(...params);
+  return getConnection(id);
+}
+
+function deleteConnection(id) {
+  db.prepare('UPDATE conversations SET connection_id = NULL WHERE connection_id = ?').run(id);
+  return db.prepare('DELETE FROM connections WHERE id = ?').run(id);
+}
+
+// Channel ka wo account jiska webhook payload is conversation se aaya.
+// Pehle account_id exact match, warna channel ka pehla enabled connection.
+function findConnectionForChannel(channel, accountId) {
+  if (accountId) {
+    const byAccount = db
+      .prepare('SELECT * FROM connections WHERE channel = ? AND account_id = ? AND enabled = 1 LIMIT 1')
+      .get(channel, String(accountId));
+    if (byAccount) return resolvedConnection(byAccount);
+  }
+  const first = db
+    .prepare('SELECT * FROM connections WHERE channel = ? AND enabled = 1 ORDER BY id LIMIT 1')
+    .get(channel);
+  return first ? resolvedConnection(first) : null;
+}
+
+// Ye list webhook.js ko chahiye: har app secret signature verify karne ke liye,
+// aur har verify token GET handshake accept karne ke liye.
+function listAllVerifyTokens() {
+  const tokens = db
+    .prepare('SELECT verify_token_enc FROM connections WHERE enabled = 1 AND verify_token_enc IS NOT NULL')
+    .all()
+    .map((r) => decrypt(r.verify_token_enc))
+    .filter(Boolean);
+  return [...new Set(tokens)];
+}
+
+function listAllAppSecrets() {
+  const secrets = db
+    .prepare('SELECT app_secret_enc FROM connections WHERE enabled = 1 AND app_secret_enc IS NOT NULL')
+    .all()
+    .map((r) => decrypt(r.app_secret_enc))
+    .filter(Boolean);
+  return [...new Set(secrets)];
+}
+
 // ------------------------------------------------------- conversations
-function findOrCreateConversation({ channel, externalId, contactName, photo }) {
+function findOrCreateConversation({ channel, externalId, contactName, photo, connectionId }) {
   const existing = db.prepare(
     'SELECT * FROM conversations WHERE channel = ? AND external_id = ?'
   ).get(channel, externalId);
@@ -137,25 +336,31 @@ function findOrCreateConversation({ channel, externalId, contactName, photo }) {
       db.prepare('UPDATE conversations SET photo = ? WHERE id = ?')
         .run(photo, existing.id);
     }
+    // Purani conversations (jo .env se bani) ab UI-added connection se attach ho jati hain
+    if (connectionId && !existing.connection_id) {
+      db.prepare('UPDATE conversations SET connection_id = ? WHERE id = ?')
+        .run(connectionId, existing.id);
+    }
     return db.prepare('SELECT * FROM conversations WHERE id = ?').get(existing.id);
   }
 
   const t = now();
   db.prepare(
-    `INSERT INTO conversations (channel, external_id, contact_name, photo, created_at, last_message_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(channel, externalId, contactName || 'Unknown', photo || null, t, t);
+    `INSERT INTO conversations (channel, external_id, contact_name, photo, connection_id, created_at, last_message_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(channel, externalId, contactName || 'Unknown', photo || null, connectionId || null, t, t);
 
   return db.prepare('SELECT * FROM conversations WHERE channel = ? AND external_id = ?')
     .get(channel, externalId);
 }
 
 const CONVERSATION_FIELDS = `c.id, c.channel, c.external_id, c.contact_name, c.status, c.note, c.photo,
-  c.unread, c.last_message_at, c.created_at,
+  c.unread, c.last_message_at, c.created_at, c.connection_id,
+  cn.name AS connection_name,
   a.id AS assigned_agent_id, a.name AS assigned_agent_name,
   (SELECT body FROM messages m WHERE m.conversation_id = c.id AND m.sender != 'note' ORDER BY m.id DESC LIMIT 1) AS last_message`;
 
-function listConversations({ status, channel, limit = 200 } = {}) {
+function listConversations({ status, channel, unread, limit = 200 } = {}) {
   const conditions = [];
   const params = [];
   if (status && status !== 'all') {
@@ -166,6 +371,9 @@ function listConversations({ status, channel, limit = 200 } = {}) {
     conditions.push('c.channel = ?');
     params.push(channel);
   }
+  if (unread) {
+    conditions.push('c.unread > 0');
+  }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   params.push(Math.min(Number(limit) || 200, 500));
 
@@ -173,6 +381,7 @@ function listConversations({ status, channel, limit = 200 } = {}) {
     `SELECT ${CONVERSATION_FIELDS}
      FROM conversations c
      LEFT JOIN agents a ON a.id = c.assigned_agent_id
+     LEFT JOIN connections cn ON cn.id = c.connection_id
      ${where}
      ORDER BY c.last_message_at DESC
      LIMIT ?`
@@ -184,6 +393,7 @@ function getConversation(id) {
     `SELECT ${CONVERSATION_FIELDS}
      FROM conversations c
      LEFT JOIN agents a ON a.id = c.assigned_agent_id
+     LEFT JOIN connections cn ON cn.id = c.connection_id
      WHERE c.id = ?`
   ).get(id);
 }
@@ -219,8 +429,8 @@ function incrementUnread(id, skip) {
 }
 
 // ------------------------------------------------------------ messages
-function addMessage({ conversationId, direction, body, type = 'text', metaId = null, agentId = null, mediaType = null, mediaUrl = null, sender = null, replyToId = null, touchConversation = true }) {
-  const t = now();
+function addMessage({ conversationId, direction, body, type = 'text', metaId = null, agentId = null, mediaType = null, mediaUrl = null, sender = null, replyToId = null, touchConversation = true, createdAt = null }) {
+  const t = createdAt || now();
   const r = db.prepare(
     `INSERT INTO messages (conversation_id, direction, body, type, meta_id, agent_id, media_type, media_url, sender, reply_to_id, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -305,6 +515,23 @@ function findMessageByMetaId(metaId, conversationId) {
     .get(metaId, conversationId);
 }
 
+function hasMessages(conversationId) {
+  return db
+    .prepare("SELECT count(*) AS n FROM messages WHERE conversation_id = ? AND sender != 'note'")
+    .get(conversationId).n > 0;
+}
+
+function setConversationTimestamps(id, { lastMessageAt, createdAt } = {}) {
+  if (lastMessageAt) {
+    db.prepare('UPDATE conversations SET last_message_at = ? WHERE id = ? AND ? > last_message_at')
+      .run(lastMessageAt, id, lastMessageAt);
+  }
+  if (createdAt) {
+    db.prepare('UPDATE conversations SET created_at = ? WHERE id = ? AND created_at = 0')
+      .run(createdAt, id);
+  }
+}
+
 module.exports = {
   db,
   seedAdmin,
@@ -314,6 +541,14 @@ module.exports = {
   createAgent,
   deleteAgent,
   setAgentPhoto,
+  listConnections,
+  getConnection,
+  createConnection,
+  updateConnection,
+  deleteConnection,
+  findConnectionForChannel,
+  listAllVerifyTokens,
+  listAllAppSecrets,
   findOrCreateConversation,
   listConversations,
   getConversation,
@@ -330,5 +565,7 @@ module.exports = {
   listMessages,
   getMessage,
   findMessageByMetaId,
+  hasMessages,
+  setConversationTimestamps,
   now,
 };
