@@ -111,8 +111,16 @@ Callback URL aur Verify token dono wahi dene hain jo aap UI mein likh rahe hain.
 
 ## Purana tareeqa — `.env` se connect karna (ab bhi chalta hai)
 
-UI wala tareeqa behtar hai, lekin `.env` fallback bhi supported hai (jo token
-DB me nahi milta, wahi use hota hai). Naam ke hisaab se:
+UI wala tareeqa behtar hai, lekin `.env` fallback bhi supported hai. Ab ek
+**auto-bootstrap** bhi hai: server start par agar `.env` mein token/account hain
+aur us channel+account ki koi connection DB mein nahi, to wahan se connection
+khud ban jati hai aur phir pehli baar **old chats sync** bhi khud chalta hai.
+
+> Agar aapne pehle sirf `.env` use kiya tha, to pehla restart connection bana
+> dega aur aapki purani FB/IG chats inbox me aana shuru ho jayengi. Uske baad
+> Channels page se connection dekh/change/delete kar sakte hain. Dobara restart
+> par sync nahi chalta (sirf nayi seed par) — unhe manually **Old chats sync**
+> button se re-run karte hain.
 
 ---
 

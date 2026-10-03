@@ -7,6 +7,7 @@ const { router: apiRouter } = require('./api');
 const webhookRouter = require('./webhook');
 const { stream } = require('./realtime');
 const backup = require('./services/backup');
+const bootstrap = require('./services/bootstrap');
 
 db.seedAdmin();
 
@@ -18,6 +19,32 @@ try {
 } catch (e) {
   console.warn(`[backup] backup nahi ban saki: ${e.message}`);
 }
+
+// `.env` fallback tokens hain lekin DB connections nahi? To unse seed karo,
+// phir pehli baar import bhi shuru kar do (aage ke imports UI se hote hain).
+// Ye async chalta hai — server startup par block nahi karta.
+(async () => {
+  let seeded = [];
+  try {
+    seeded = await bootstrap.seedFromEnv();
+  } catch (e) {
+    console.warn(`[bootstrap] .env seed fail hua: ${e.message}`);
+  }
+  if (!seeded.length) return;
+
+  try {
+    const { syncConnection } = require('./services/sync');
+    for (const conn of seeded) {
+      const result = await syncConnection(conn);
+      const log = result.error
+        ? `sync error: ${result.error}`
+        : `${result.total} conversations — ${result.created} import hui, ${result.messages_imported} messages`;
+      console.log(`[bootstrap] ${conn.channel} "${conn.name}" old-chats sync: ${log}`);
+    }
+  } catch (e) {
+    console.warn(`[bootstrap] auto old-chats sync fail hua: ${e.message}`);
+  }
+})();
 
 const app = express();
 app.disable('x-powered-by');

@@ -17,7 +17,7 @@ const { graphUrl } = require('./send');
 
 const FIELD_SETS = {
   facebook:
-    'participants{name,id,email},snippet,updated_time,unread_count,message_count,messages{id,message,created_time,from{id,name},attachments{type,media_type}}',
+    'participants{name,id,email},snippet,updated_time,unread_count,message_count,messages{id,message,created_time,from{id,name,email},attachments{type,media_type}}',
   instagram:
     'participants{name,id,username},snippet,updated_time,unread_count,message_count,messages{id,message,created_time,from{id,username},attachments{type,media_type}}',
 };
@@ -48,14 +48,20 @@ async function syncConnection(conn) {
     return result;
   }
 
+  // Apna account participants/messages se kaise pehchana jaye.
+  // Instagram par conversations ke andar account ka scoped ID (
+  // "ig_id") accountId se alag format ka hota hai, is liye username se
+  // match karna safe hai. Facebook par page ID hi accountId hai.
+  const selfUsername = await resolveSelfUsername(conn);
+
   const host = conn.apiHost === 'instagram' ? 'instagram' : 'facebook';
-  const prefix =
-    conn.channel === 'instagram'
-      ? `${graphUrl(host, conn.accountId)}/conversations?platform=instagram`
-      : `${graphUrl(host, conn.accountId)}/conversations`;
+  // Instagram wale URL par platform param pehle se hai; us case mein next
+  // params `&` se jude hain (double ? = URL bug).
+  const base = `${graphUrl(host, conn.accountId)}/conversations`;
+  const sep = conn.channel === 'instagram' ? '?platform=instagram&' : '?';
 
   let url =
-    `${prefix}?fields=${encodeURIComponent(fields)}&limit=100&access_token=${encodeURIComponent(conn.token)}`;
+    `${base}${sep}fields=${encodeURIComponent(fields)}&limit=100&access_token=${encodeURIComponent(conn.token)}`;
   let pages = 0;
 
   try {
@@ -71,7 +77,7 @@ async function syncConnection(conn) {
 
       for (const conv of data.data || []) {
         result.total += 1;
-        importOne(conn, conv, result);
+        importOne(conn, conv, result, selfUsername);
       }
       url = data.paging && data.paging.next ? data.paging.next : null;
     }
@@ -82,11 +88,45 @@ async function syncConnection(conn) {
   return result;
 }
 
-function importOne(conn, apiConversation, result) {
+// Account ka username nikaalne ki koshish (IG ke liye zaroori — wahan
+// message/participant IDs scoped format mein hoti hain jo accountId se
+// match nahi karti). Fail ho to null — phir sender detection sirf ID se
+// chalegi (FB ke liye kaafi hai).
+async function resolveSelfUsername(conn) {
+  try {
+    const host = conn.apiHost === 'instagram' ? 'instagram' : 'facebook';
+    const url = `${graphUrl(host, conn.accountId)}?fields=id,username&access_token=${encodeURIComponent(conn.token)}`;
+    const res = await fetch(url);
+    const data = await res.json().catch(() => ({}));
+    return data.username || null;
+  } catch {
+    return null;
+  }
+}
+
+// Kya ye participant/message hamaara apna account hai?
+// - Facebook: page id == accountId
+// - Instagram: username match (scoped ID alag format ka hota hai)
+function isSelf(conn, selfUsername, who) {
+  if (!who) return false;
+  if (who.username && selfUsername && String(who.username) === String(selfUsername)) {
+    return true;
+  }
+  if (who.id && String(who.id) === String(conn.accountId)) return true;
+  // Meta FB messages mein "from" kabhi kabhi id ke bajaye email deta hai
+  // ({psid}@facebook.com). Email ka prefix hi PSID hota hai.
+  if (who.email) {
+    const prefix = String(who.email).split('@')[0];
+    if (prefix && String(prefix) === String(conn.accountId)) return true;
+  }
+  return false;
+}
+
+function importOne(conn, apiConversation, result, selfUsername) {
   // "participant" = customer jo page/account par message karta hai.
   // Apna account khud exclude karo; group chats ke liye conversation id key.
   const participants = (apiConversation.participants && apiConversation.participants.data) || [];
-  const others = participants.filter((p) => String(p.id) !== String(conn.accountId));
+  const others = participants.filter((p) => !isSelf(conn, selfUsername, p));
 
   let externalId;
   let contactName = null;
@@ -94,11 +134,14 @@ function importOne(conn, apiConversation, result) {
 
   if (others.length === 1) {
     externalId = String(others[0].id);
-    contactName = others[0].name || null;
+    contactName = others[0].name || others[0].username || null;
   } else if (others.length > 1) {
     // group/thread - conversation id hi identity hai
     externalId = String(apiConversation.id);
-    contactName = others.map((p) => p.name || p.id).slice(0, 3).join(', ');
+    contactName = others
+      .map((p) => p.name || p.username || p.id)
+      .slice(0, 3)
+      .join(', ');
   } else {
     // koi participant info nahi mili - conversation id se hi chala lo
     externalId = String(apiConversation.id);
@@ -136,10 +179,8 @@ function importOne(conn, apiConversation, result) {
     const existing = db.findMessageByMetaId(metaId, conversation.id);
     if (existing) continue; // pehle se import ho chuka - dedupe
 
-    const msgFromId = msg.from && msg.from.id ? String(msg.from.id) : null;
     // Apna page/account bhej raha hai to outbound, warna customer ka inbound.
-    const direction =
-      msgFromId && String(conn.accountId) === msgFromId ? 'outbound' : 'inbound';
+    const direction = isSelf(conn, selfUsername, msg.from) ? 'outbound' : 'inbound';
 
     let body = (msg.message || '').trim();
     let type = 'text';
