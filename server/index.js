@@ -6,8 +6,18 @@ const db = require('./db');
 const { router: apiRouter } = require('./api');
 const webhookRouter = require('./webhook');
 const { stream } = require('./realtime');
+const backup = require('./services/backup');
 
 db.seedAdmin();
+
+// Har server-start par DB ki consistent backup banti hai (WAL-safe).
+// Fail hone par sirf warning — server start honey se nahi rukta.
+try {
+  const backedUp = backup.createBackup();
+  console.log(`[backup] DB backup bana: ${path.basename(backedUp)}`);
+} catch (e) {
+  console.warn(`[backup] backup nahi ban saki: ${e.message}`);
+}
 
 const app = express();
 app.disable('x-powered-by');

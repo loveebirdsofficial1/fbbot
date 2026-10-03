@@ -133,13 +133,16 @@ function ConnectionCard({ conn, onChanged, onToast }) {
   }
 
   async function syncOld() {
-    if (!window.confirm(`${conn.name} ki purani conversations import karein? Facebook/Instagram sirf conversation list + aakhri message import kar sakta hai (poori history Meta deta nahi).`)) return;
+    if (!window.confirm(`${conn.name} ki purani conversations import karein? Facebook/Instagram har thread ki list + latest messages (20 tak) import karta hai - Meta 20 se purani history nahi deta.`)) return;
     setBusy('sync');
     try {
       const res = await api.syncConnection(conn.id);
       const r = res.result || {};
       if (r.error) throw new Error(r.error);
-      onToast(`${r.total} conversations milein — ${r.created} inbox me aa gayi${r.with_snippet ? ` (${r.with_snippet} mein aakhri message)` : ''}`);
+      let msg = `${r.total} conversations milein — ${r.created} inbox me aa gayi`;
+      if (r.messages_imported) msg += `, ${r.messages_imported} messages import hue`;
+      if (r.with_snippet) msg += ` (${r.with_snippet} threads sirf aakhri message ke saath)`;
+      onToast(msg);
       onChanged();
     } catch (e) {
       onToast(e.message, true);

@@ -2,20 +2,24 @@ const db = require('../db');
 const { graphUrl } = require('./send');
 
 // Meta ki "conversations" edge se account ke PEHLI SE maujood chats import
-// karta hai. Meta message content ki full history API se nahi deta, lekin
-// conversation ki LIST + last message ka snippet zaroor deta hai:
+// karta hai. Meta poori history API se nahi deta, lekin:
+//   - thread ki LIST to milti hai (paginated)
+//   - har thread ke latest messages (20 tak) ka CONTENT milta hai
+//   - 20 se purane messages ka content Meta "message has been deleted" error
+//     karke door kar deta hai (platform policy — is ka koi workaround nahi)
+// Endpoints:
 //   Facebook  -> GET /{page_id}/conversations
 //   Instagram -> GET /{ig_id}/conversations?platform=instagram
 // (WhatsApp par history API hai hi nahi - sirf naye webhook messages aate hain.)
 //
-// Import sirf unmatch hua data add karta hai; dobara sync par koi duplicate
+// Import unmatcha hua data hi add karta hai; dobara sync par koi duplicate
 // nahi banta (meta_id se dedupe).
 
 const FIELD_SETS = {
   facebook:
-    'participants{name,id,email},snippet,updated_time,unread_count,message_count',
+    'participants{name,id,email},snippet,updated_time,unread_count,message_count,messages{id,message,created_time,from{id,name},attachments{type,media_type}}',
   instagram:
-    'participants{name,id,username},snippet,updated_time,unread_count,message_count',
+    'participants{name,id,username},snippet,updated_time,unread_count,message_count,messages{id,message,created_time,from{id,username},attachments{type,media_type}}',
 };
 
 async function syncConnection(conn) {
@@ -24,6 +28,7 @@ async function syncConnection(conn) {
     total: 0,
     created: 0,
     with_snippet: 0,
+    messages_imported: 0,
     failed: 0,
     error: null,
   };
@@ -100,10 +105,7 @@ function importOne(conn, apiConversation, result) {
     contactName = null;
   }
 
-  const updatedTime = apiConversation.updated_time
-    ? Math.floor(new Date(apiConversation.updated_time).getTime() / 1000)
-    : null;
-  const snippet = (apiConversation.snippet || '').trim();
+  const apiMessages = (apiConversation.messages && apiConversation.messages.data) || [];
 
   let conversation;
   try {
@@ -119,32 +121,94 @@ function importOne(conn, apiConversation, result) {
     return;
   }
 
+  const updatedTime = apiConversation.updated_time
+    ? Math.floor(new Date(apiConversation.updated_time).getTime() / 1000)
+    : null;
   if (updatedTime) db.setConversationTimestamps(conversation.id, { lastMessageAt: updatedTime });
 
-  // Purani thread me sirf snippet hi milta hai - poori history nahi. Snippet
-  // tab import karo jab conversation khaali ho warna asal thread ko nahi
-  // chheRte (aur dobara sync par duplicate bhi nahi banega).
-  const hadMessages = db.hasMessages(conversation.id);
-  if (snippet && !hadMessages) {
-    const metaId = `snip:${conn.id}:${externalId}`;
+  // Asli thread messages import karo. Meta har thread ke ZIYADA TAR messages
+  // ka content nahi deta - sirf latest (20 tak) deta hai; purane ke liye
+  // "message has been deleted" error aata hai. Jo content mile wo import karo.
+  let importedMessages = 0;
+  let lastCreated = 0;
+  for (const msg of apiMessages) {
+    const metaId = `msg:${conn.id}:${msg.id}`;
     const existing = db.findMessageByMetaId(metaId, conversation.id);
-    if (!existing) {
-      try {
-        db.addMessage({
-          conversationId: conversation.id,
-          direction: 'inbound',
-          body: snippet,
-          type: 'text',
-          metaId,
-          sender: 'customer',
-          touchConversation: false,
-          createdAt: updatedTime,
-        });
-        result.with_snippet += 1;
-      } catch {
-        result.failed += 1;
+    if (existing) continue; // pehle se import ho chuka - dedupe
+
+    const msgFromId = msg.from && msg.from.id ? String(msg.from.id) : null;
+    // Apna page/account bhej raha hai to outbound, warna customer ka inbound.
+    const direction =
+      msgFromId && String(conn.accountId) === msgFromId ? 'outbound' : 'inbound';
+
+    let body = (msg.message || '').trim();
+    let type = 'text';
+    if (!body && Array.isArray(msg.attachments) && msg.attachments.length) {
+      const a = msg.attachments[0];
+      type = a.type && a.type !== 'file' ? a.type : 'document';
+      body = `[${type}]`;
+    }
+
+    if (!body) continue; // koi content nahi (sirf echo/deleted) - chhodo
+
+    const createdAt = msg.created_time
+      ? Math.floor(new Date(msg.created_time).getTime() / 1000)
+      : null;
+
+    try {
+      db.addMessage({
+        conversationId: conversation.id,
+        direction,
+        body,
+        type,
+        metaId,
+        sender: direction === 'outbound' ? 'agent' : 'customer',
+        touchConversation: false,
+        createdAt,
+      });
+      importedMessages += 1;
+      if (createdAt && createdAt > lastCreated) lastCreated = createdAt;
+    } catch {
+      result.failed += 1;
+      continue;
+    }
+  }
+  result.messages_imported += importedMessages;
+
+  // Meta thread ke purane messages ka content nahi deta — sirf aakhri snippet
+  // deta hai. Agar koi message content na mila ho (e.g. poori thread 20 se
+  // purani) to snippet import karo, taake conversation khali na dikhe.
+  if (!importedMessages) {
+    const snippet = (apiConversation.snippet || '').trim();
+    if (snippet && !db.hasMessages(conversation.id)) {
+      const metaId = `snip:${conn.id}:${externalId}`;
+      if (!db.findMessageByMetaId(metaId, conversation.id)) {
+        try {
+          db.addMessage({
+            conversationId: conversation.id,
+            direction: 'inbound',
+            body: snippet,
+            type: 'text',
+            metaId,
+            sender: 'customer',
+            touchConversation: false,
+            createdAt: updatedTime,
+          });
+          result.with_snippet += 1;
+        } catch {
+          result.failed += 1;
+        }
       }
     }
+  }
+
+  // Aakhri imported message ka timestamp bhi conversation par laga do,
+  // taake inbox ordering sahi rahe. (Webhook ke naye messages khud unread
+  // banate hain; import walon ka unread neeche 0 kar diya jata hai.)
+  if (lastCreated) {
+    db.db
+      .prepare('UPDATE conversations SET last_message_at = ? WHERE id = ? AND ? > last_message_at')
+      .run(lastCreated, conversation.id, lastCreated);
   }
 
   // Import ke bad unread nahi chahiye - ye purane chats hain jo abhi dekhe

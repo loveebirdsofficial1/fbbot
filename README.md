@@ -57,19 +57,23 @@ conversation usi connection se reply bhejti hai jis page/number se aayi thi.
 ### Purani (old) conversations import — "Old chats sync"
 
 Webhook se sirf **naye** messages aate hain. Meta poori message history ki API
-nahi deta, lekin Facebook/Instagram account ki **conversations list + last
-message (snippet)** zaroor milta hai. Inhe import karne ke liye:
+nahi deta, lekin Facebook/Instagram account ki **conversations list + har thread
+ke latest messages (20 tak)** ka import zaroor hota hai. Inhe import karne ke
+liye:
 
 1. **Channels** page kholein
 2. Facebook/Instagram connection par **"Old chats sync"** button dabayein
-3. Chats inbox mein aa jati hain — contact naam, last message, aur sahi
+3. Chats inbox mein aa jati hain — contact naam, latest messages, aur sahi
    connection ke saath
 
+- Har thread ke **latest messages ka content** import hota hai (direction
+  inbound/outbound sahi se, original timestamps ke saath). Meta ki limit:
+  **sirf 20 sab se naye messages** ka content milta hai — 20 se purani messages
+  ka content API ko nahi diya jata ("message has been deleted"). Ye Meta ki
+  policy hai, is ka koi workaround nahi.
 - Dobara sync kartay hain to **duplicate nahi** banta (meta_id se dedupe)
 - Imported chats **unread=0** rakhti hain (ye purani batcheet hai jo ab dekh
   rahe hain — naye webhook messages normal unread rakhte hain)
-- Purani thread ka sirf last message (snippet) dekhne milta hai; poori history
-  har Meta app ke liye API se band hai
 - **WhatsApp** par history API hai hi nahi — wahan sirf naye messages aate hain
 
 ### Tokens secure hain
@@ -212,6 +216,21 @@ WA_OWN_NUMBER=<apna_number_without_+55 e.g. 15551234567>
 | POST | `/api/connections/:id/subscribe` | Meta par webhook subscribe (admin) |
 | POST | `/api/connections/:id/sync` | purani conversations import karo (admin) |
 | GET | `/api/stream` | SSE realtime |
+
+## Database backup
+
+- Har **server-start** par `data/backups/` folder mein SQLite ki consistent copy
+  banti hai: `omnichannel-YYYYMMDD-HHmmss.db` (WAL-data samet, `VACUUM INTO`
+  se — is liye state chala raha ho tab bhi backup durust hoti hai)
+- Sirf **aakhri 10** backups rakhti hai (`BACKUP_KEEP` se badal sakte ho),
+  purane khud delete ho jate hain
+- Backup recover karne ke liye bas purani file ko `data/omnichannel.db` par
+  waapas rakh do (server band kar ke) ya seedha khol ke data dekh lo.
+- `.env` se:
+  ```
+  BACKUP_DIR=data/backups
+  BACKUP_KEEP=10
+  ```
 
 ## Security notes
 

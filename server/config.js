@@ -46,6 +46,13 @@ const config = {
         ? process.env.DB_FILE
         : path.resolve(__dirname, '..', process.env.DB_FILE))
     : path.join(__dirname, '..', 'data', 'omnichannel.db'),
+
+  backupDir: process.env.BACKUP_DIR
+    ? (path.isAbsolute(process.env.BACKUP_DIR)
+        ? process.env.BACKUP_DIR
+        : path.resolve(__dirname, '..', process.env.BACKUP_DIR))
+    : path.join(__dirname, '..', 'data', 'backups'),
+  backupKeep: parseInt(process.env.BACKUP_KEEP || '10', 10),
 };
 
 module.exports = config;
